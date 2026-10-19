@@ -4,8 +4,16 @@ OHCP 一小时智能编程大赛作品。自然语言提问 → ReAct 智能体�
 
 ## 一键启动
 
+**网页版（推荐，浏览器聊天界面）：**
+
 ```bash
 pip install -r requirements.txt
+python web.py            # 默认 http://127.0.0.1:8611，自动打开浏览器
+```
+
+**命令行版：**
+
+```bash
 python run.py
 ```
 
@@ -21,22 +29,25 @@ python run.py
 
 交互命令：`help` 帮助 ｜ `board` 任务看板 ｜ `mode 专业/简易` 切换输出模板 ｜ `quit` 退出。
 
+网页版与命令行版共用同一套 Agent 内核，额外提供：快捷提问 chips、ReAct 执行轨迹折叠面板、结果表格与图表内联渲染。
+
 ## 运行链路
 
 ```
-用户自然语言提问
+用户自然语言提问（网页 / 命令行）
   → 规划器（本地规则 / 可选 LLM）解析意图与槽位
   → ReAct 引擎：Thought → Action(工具) → Observation 循环
        工具链：load_data → aggregate → check_standard → detect_anomaly
                → plot_chart → validate
-  → 输出：结构化文本结论 + PNG 图表 + HTML 报告（自动打开浏览器）
+  → 输出：结构化文本结论 + PNG 图表 + HTML 报告（命令行自动打开浏览器）
 ```
 
 ## 目录结构
 
 ```
 air-quality-agent/
-├── run.py                     # 一键启动入口
+├── run.py                     # 命令行一键启动入口
+├── web.py                     # 网页版启动入口（零第三方 Web 框架）
 ├── requirements.txt
 ├── aq_agent/                  # 主包
 │   ├── config.py              # GB 3095-2012 限值、路径、季节常量
