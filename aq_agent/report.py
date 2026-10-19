@@ -55,7 +55,7 @@ def build_text_report(plan, result) -> str:
 
 
 def build_html_report(plan, result) -> str:
-    """生成 HTML 报告（浅色主题，图表相对路径引用）。"""
+    """生成 HTML 报告（深空遥测主题，图表相对路径引用）。"""
     config.setup_chinese_font() if hasattr(config, "setup_chinese_font") else None
     chart_rel = ""
     if result.get("图表路径"):
@@ -73,21 +73,26 @@ def build_html_report(plan, result) -> str:
 
     page = f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>空气质量时序分析报告</title>
 <style>
-body{{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f5f7fa;color:#1f2937;margin:0;padding:24px}}
-.wrap{{max-width:920px;margin:0 auto;background:#fff;border-radius:12px;padding:28px 32px;box-shadow:0 2px 10px rgba(0,0,0,.06)}}
-h1{{font-size:22px;margin:0 0 4px}}
-.meta{{color:#6b7280;font-size:13px;margin-bottom:18px}}
-section{{margin:18px 0}}
-h2{{font-size:16px;border-left:4px solid #3b7dd8;padding-left:8px;margin:14px 0 8px}}
-table{{border-collapse:collapse;width:100%;font-size:14px}}
-th,td{{border:1px solid #e5e7eb;padding:6px 10px;text-align:left}}
-th{{background:#eef2f7}}
-.tip{{background:#f0f7ff;border:1px solid #cfe3ff;border-radius:8px;padding:10px 14px;font-size:13px;margin:8px 0}}
-.soul{{background:#f0faf3;border:1px solid #c9e8d4;border-radius:8px;padding:10px 14px;font-size:13px;margin:8px 0}}
-img{{max-width:100%;border:1px solid #e5e7eb;border-radius:8px}}
-pre{{background:#f8fafc;border:1px solid #e5e7eb;border-radius:8px;padding:10px;font-size:12.5px;white-space:pre-wrap}}
+:root{{--panel:#0d1526;--line:#1c2a4a;--line-hi:#2b4166;--txt:#d7e3f4;--dim:#8ba0bf;--cyan:#22d3ee;--cyan-hi:#67e8f9;--green:#34d399;--mono:"Cascadia Code","JetBrains Mono","Cascadia Mono",Consolas,"Liberation Mono",monospace;--sans:"Microsoft YaHei","PingFang SC","Noto Sans SC",sans-serif}}
+*{{box-sizing:border-box}}
+body{{font-family:var(--sans);color:var(--txt);margin:0;padding:28px 20px;background:radial-gradient(1100px 480px at 50% -200px,rgba(34,211,238,.10),transparent 60%),linear-gradient(rgba(56,189,248,.04) 1px,transparent 1px),linear-gradient(90deg,rgba(56,189,248,.04) 1px,transparent 1px),#05080f;background-size:auto,44px 44px,44px 44px,auto}}
+.wrap{{max-width:920px;margin:0 auto;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:28px 34px;box-shadow:0 12px 36px rgba(2,6,15,.55)}}
+h1{{font-size:22px;margin:0 0 4px;letter-spacing:.04em}}
+.meta{{color:var(--dim);font-family:var(--mono);font-size:12px;margin-bottom:20px;letter-spacing:.02em}}
+section{{margin:20px 0}}
+h2{{font-size:15px;border-left:3px solid var(--cyan);padding-left:10px;margin:16px 0 10px;letter-spacing:.08em;color:var(--cyan-hi);font-family:var(--mono)}}
+p{{line-height:1.8}}
+table{{border-collapse:collapse;width:100%;font-size:13px;margin:10px 0}}
+th,td{{border:1px solid var(--line);padding:7px 11px;text-align:left}}
+th{{background:#0f1b31;color:var(--cyan-hi);font-family:var(--mono);font-size:12px;letter-spacing:.05em}}
+tr:nth-child(even) td{{background:rgba(34,211,238,.03)}}
+.tip{{background:rgba(34,211,238,.06);border:1px solid rgba(34,211,238,.25);border-radius:6px;padding:11px 15px;font-size:13px;margin:10px 0;line-height:1.75}}
+.soul{{background:rgba(52,211,153,.07);border:1px solid rgba(52,211,153,.3);border-radius:6px;padding:11px 15px;font-size:13px;margin:10px 0;line-height:1.75}}
+img{{max-width:100%;border:1px solid var(--line-hi);border-radius:8px;box-shadow:0 0 26px rgba(34,211,238,.10)}}
+pre{{background:#080d18;border:1px solid var(--line);border-radius:6px;padding:12px;font-size:12px;white-space:pre-wrap;font-family:var(--mono);color:#b9cbe4;line-height:1.6}}
 </style></head><body><div class="wrap">
 <h1>空气质量时序分析报告</h1>
 <div class="meta">生成时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ｜ 数据来源：中国环境监测总站公开数据（CN-AIR）</div>
