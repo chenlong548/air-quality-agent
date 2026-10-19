@@ -1,0 +1,106 @@
+# -*- coding: utf-8 -*-
+"""输出层：结构化文本结论、HTML 报告、课程思政文案自然融入。"""
+import datetime
+import html
+import os
+
+from . import config
+from . import analysis
+
+# ---------------- 课程思政文案（简短、随业务输出、不弹窗不说教） ----------------
+
+EDU_GB_TIP = ("我国《环境空气质量标准》GB 3095-2012 规定：{limit}。"
+              "改善大气环境质量、守护人居生态，青年一代正可以运用大数据与 AI 技术"
+              "助力生态环境监测，把论文写在祖国大地上。")
+
+EDU_CLOSING = ("环境小感悟：大气监测时序大数据为城市大气污染防控提供重要支撑。"
+               "绿水青山就是金山银山，新时代青年可以将 Agent 与大数据技术服务美丽中国建设，践行科技报国。")
+
+EDU_BUSINESS = ("业务解读：时序监测大数据可支撑污染溯源与治理评估——"
+                "持续追踪高值时段与区域分布，是精准治霾、科学治污的重要依据。")
+
+POLLUTION_CARD = {
+    "PM2.5": "PM2.5 可深入肺部并进入血液，长期暴露增加呼吸道与心血管疾病风险。",
+    "PM10": "PM10 可刺激呼吸道，诱发咳嗽与哮喘，影响能见度。",
+    "O3": "臭氧(O₃)是二次污染物，强氧化性，刺激呼吸道、降低肺功能。",
+    "SO2": "二氧化硫刺激呼吸道，是酸雨的重要前体物。",
+    "NO2": "二氧化氮刺激肺部，是臭氧与二次颗粒物的重要前体物。",
+    "CO": "一氧化碳与血红蛋白结合能力强，高浓度时影响人体供氧。",
+}
+
+
+def edu_limit_tip(pollutant, kind=None):
+    limit_text = analysis.format_limit_text(pollutant, kind)
+    return EDU_GB_TIP.format(limit=limit_text)
+
+
+def build_text_report(plan, result) -> str:
+    """结构化文本结论（终端展示用）。"""
+    lines = []
+    lines.append(f"【分析任务】{plan.raw}")
+    lines.append(f"【统计口径】{result.get('口径', '')}")
+    lines.append("【统计结果】")
+    lines.append(result.get("表格文本", "（无）"))
+    if result.get("超标研判"):
+        lines.append(f"【超标研判】{result['超标研判']}")
+    if result.get("图表路径"):
+        lines.append(f"【图表输出】{result['图表路径']}")
+    if result.get("校验"):
+        lines.append(f"【结果校验】{result['校验']}")
+    # 思政自然融入：国标科普 + 感悟，随结果一并输出
+    if plan.pollutant in POLLUTION_CARD:
+        lines.append(f"【科普卡片】{POLLUTION_CARD[plan.pollutant]}")
+    lines.append(EDU_CLOSING)
+    return "\n".join(lines)
+
+
+def build_html_report(plan, result) -> str:
+    """生成 HTML 报告（浅色主题，图表相对路径引用）。"""
+    config.setup_chinese_font() if hasattr(config, "setup_chinese_font") else None
+    chart_rel = ""
+    if result.get("图表路径"):
+        chart_rel = os.path.relpath(result["图表路径"], config.REPORT_DIR).replace("\\", "/")
+
+    def sec(title, body_html):
+        return f'<section><h2>{html.escape(title)}</h2>{body_html}</section>'
+
+    table_html = result.get("表格HTML", "")
+    edu_html = ""
+    if plan.pollutant in POLLUTION_CARD:
+        edu_html += f'<div class="tip"><b>科普卡片</b>：{html.escape(POLLUTION_CARD[plan.pollutant])}</div>'
+    edu_html += f'<div class="tip"><b>国标提示</b>：{html.escape(edu_limit_tip(plan.pollutant))}</div>'
+    edu_html += f'<div class="soul">{html.escape(EDU_CLOSING)}</div>'
+
+    page = f"""<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<title>空气质量时序分析报告</title>
+<style>
+body{{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:#f5f7fa;color:#1f2937;margin:0;padding:24px}}
+.wrap{{max-width:920px;margin:0 auto;background:#fff;border-radius:12px;padding:28px 32px;box-shadow:0 2px 10px rgba(0,0,0,.06)}}
+h1{{font-size:22px;margin:0 0 4px}}
+.meta{{color:#6b7280;font-size:13px;margin-bottom:18px}}
+section{{margin:18px 0}}
+h2{{font-size:16px;border-left:4px solid #3b7dd8;padding-left:8px;margin:14px 0 8px}}
+table{{border-collapse:collapse;width:100%;font-size:14px}}
+th,td{{border:1px solid #e5e7eb;padding:6px 10px;text-align:left}}
+th{{background:#eef2f7}}
+.tip{{background:#f0f7ff;border:1px solid #cfe3ff;border-radius:8px;padding:10px 14px;font-size:13px;margin:8px 0}}
+.soul{{background:#f0faf3;border:1px solid #c9e8d4;border-radius:8px;padding:10px 14px;font-size:13px;margin:8px 0}}
+img{{max-width:100%;border:1px solid #e5e7eb;border-radius:8px}}
+pre{{background:#f8fafc;border:1px solid #e5e7eb;border-radius:8px;padding:10px;font-size:12.5px;white-space:pre-wrap}}
+</style></head><body><div class="wrap">
+<h1>空气质量时序分析报告</h1>
+<div class="meta">生成时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ｜ 数据来源：中国环境监测总站公开数据（CN-AIR）</div>
+{sec("分析任务", f"<p>{html.escape(plan.raw)}</p>")}
+{sec("统计口径", f"<p>{html.escape(result.get('口径', ''))}</p>")}
+{sec("统计结果", table_html)}
+{sec("超标研判", f"<p>{html.escape(result.get('超标研判', ''))}</p>") if result.get("超标研判") else ""}
+{sec("可视化图表", f'<img src="{chart_rel}" alt="chart">') if chart_rel else ""}
+{sec("课程思政融入", edu_html)}
+{sec("Agent 执行轨迹", f"<pre>{html.escape(result.get('trace', ''))}</pre>")}
+</div></body></html>"""
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = os.path.join(config.REPORT_DIR, f"report_{ts}.html")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(page)
+    return path
