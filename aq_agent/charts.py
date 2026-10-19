@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """可视化：matplotlib 折线 / 柱状 / 饼图，中文字体自动探测。"""
+import datetime
 import os
 
 import matplotlib
@@ -29,8 +30,11 @@ def setup_chinese_font():
     _FONT_READY = True
 
 
-def _save(fig, name):
+def _save(fig, kind):
+    """保存图表：文件名带毫秒时间戳，保证每次提问的图都是当次真实计算结果。"""
     setup_chinese_font()
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+    name = f"chart_{kind}_{ts}.png"
     path = os.path.join(config.CHART_DIR, name)
     fig.savefig(path, bbox_inches="tight", facecolor="white")
     plt.close(fig)
@@ -49,7 +53,7 @@ def line_chart(monthly_piv, title, ylabel):
     ax.set_xticklabels([f"{m}月" for m in range(1, 13)])
     ax.grid(alpha=0.3)
     ax.legend()
-    return _save(fig, "chart_line.png")
+    return _save(fig, "line")
 
 
 def bar_chart(df, x_col, y_col, title, ylabel, color="#3b7dd8"):
@@ -61,7 +65,7 @@ def bar_chart(df, x_col, y_col, title, ylabel, color="#3b7dd8"):
     ax.grid(axis="y", alpha=0.3)
     for i, v in enumerate(df[y_col]):
         ax.text(i, v, f"{v:g}", ha="center", va="bottom", fontsize=9)
-    return _save(fig, "chart_bar.png")
+    return _save(fig, "bar")
 
 
 def pie_chart(df, label_col, value_col, title, top=10):
@@ -77,7 +81,7 @@ def pie_chart(df, label_col, value_col, title, top=10):
     ax.pie(d[value_col], labels=d[label_col].astype(str), autopct="%1.1f%%",
            startangle=90, textprops={"fontsize": 9})
     ax.set_title(title)
-    return _save(fig, "chart_pie.png")
+    return _save(fig, "pie")
 
 
 def anomaly_chart(series, hits, city, pollutant, unit):
@@ -92,4 +96,4 @@ def anomaly_chart(series, hits, city, pollutant, unit):
     ax.grid(alpha=0.3)
     ax.legend()
     fig.autofmt_xdate()
-    return _save(fig, "chart_anomaly.png")
+    return _save(fig, "anomaly")

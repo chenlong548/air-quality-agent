@@ -1,14 +1,15 @@
 # 空气质量时序分析 Agent（环境 + 大数据）
 
-OHCP 一小时智能编程大赛作品。自然语言提问 → ReAct 智能体调度工具链 → 本地真实数据集分片读取清洗 → 聚合统计 → **GB 3095-2012 国标超标研判** → 文本结论 + 可视化图表 + HTML 报告。课程思政内容随分析结果自然融入，不弹窗、不说教。
+OHCP 一小时智能编程大赛作品。自然语言提问 → **LLM 针对每个问题现生成工具调用链**（function calling 风格，任意问法）→ ReAct 引擎按链逐步调度 → 本地真实数据集分片读取清洗 → 聚合统计 → **GB 3095-2012 国标超标研判** → 文本结论 + 可视化图表 + HTML 报告。课程思政内容随分析结果自然融入，不弹窗、不说教。
 
 ## 一键启动
 
-**网页版（推荐，浏览器聊天界面）：**
+**网页版（推荐，浏览器聊天界面，流式展示调度链）：**
 
 ```bash
 pip install -r requirements.txt
 python web.py            # 默认 http://127.0.0.1:8611，自动打开浏览器
+python web.py --interval 1.5   # 调整流式步进间隔（秒，默认 1.0）
 ```
 
 **命令行版：**
@@ -29,18 +30,47 @@ python run.py
 
 交互命令：`help` 帮助 ｜ `board` 任务看板 ｜ `mode 专业/简易` 切换输出模板 ｜ `quit` 退出。
 
-网页版与命令行版共用同一套 Agent 内核，额外提供：快捷提问 chips、ReAct 执行轨迹折叠面板、结果表格与图表内联渲染。
+网页版与命令行版共用同一套 Agent 内核，额外提供：快捷提问 chips、规划卡片（调用链预览）、ReAct 执行轨迹逐条流式渲染、结果表格与图表内联展示。
 
-## 运行链路
+## Agent 调度链（核心机制）
+
+规划器把每个问题解析为一条**工具调用链**（steps），引擎逐步执行，每步一个事件：
 
 ```
-用户自然语言提问（网页 / 命令行）
-  → 规划器（本地规则 / 可选 LLM）解析意图与槽位
-  → ReAct 引擎：Thought → Action(工具) → Observation 循环
-       工具链：load_data → aggregate → check_standard → detect_anomaly
-               → plot_chart → validate
-  → 输出：结构化文本结论 + PNG 图表 + HTML 报告（命令行自动打开浏览器）
+用户提问
+  → 规划器生成调用链（LLM function calling / 本地规则，自动容错回退）
+     例：load_data → aggregate(province, exceed_days) → check_standard
+          → plot_chart(pie) → validate
+  → 引擎逐步执行，每步发出 Thought / Action / Observation 事件
+  → 网页版：事件入消息队列，SSE 按 ≥1s 间隔依次推送，前端逐条渲染
 ```
+
+可用工具（LLM 可自由组合，参数任意）：
+
+| 工具 | 作用 | 关键参数 |
+|---|---|---|
+| load_data | 分片读取并清洗数据集 | — |
+| aggregate | 分组聚合 | group_by=city/province/season/north_south，metric=mean/exceed_days，pollutant，cities，year，top_n |
+| trend | 城市月度趋势 | cities，pollutant，year |
+| season_exceed | 单城市单季节超标天数 | city，season，pollutant，year |
+| anomaly | MAD 3σ 异常检测 | city，pollutant，year |
+| check_standard | GB 3095-2012 限值口径 | pollutant，kind |
+| plot_chart | 可视化（auto 按结果选图型） | chart=auto/line/bar/pie |
+| validate | 结果合理性校验 | — |
+
+## 流式推送架构（网页版）
+
+```
+浏览器 EventSource ──GET /api/stream?q=...──▶ 服务端
+                                                │
+   Agent 后台线程运行 ──每步事件──▶ queue.Queue（消息队列缓冲）
+                                                │
+   SSE 生成器按单调时钟节流：相邻事件间隔不足 --interval 秒时 sleep 补齐，
+   再依次推送 ──▶ 前端逐条渲染（规划卡片 → 步骤卡片 → 图表 → 结论表格）
+```
+
+事件序列示例（共 23 个）：`thought×3 → plan → (thought → action → observation)×5 步 → chart → table → done → closed`。
+`POST /api/ask` 保留为一次性接口（兼容命令行与测试）。
 
 ## 目录结构
 
@@ -98,9 +128,10 @@ air-quality-agent/
 5. **双输出模板**：简易解读版 / 专业统计版（`mode` 命令切换）；
 6. **大数据分片加载**：日文件 + chunksize 流式读取，不一次性载入内存。
 
-## 可选：接入大模型做任务规划
+## 接入大模型做任务规划（function calling）
 
-默认使用本地规则规划器（无网、无 Key 也能完整演示）。如需 LLM 规划：
+默认使用本地规则规划器（无网、无 Key 也能完整演示）。接入 LLM 后，
+**每个问题都由大模型现生成工具调用链**，任意问法都能规划：
 
 ```bash
 set AQ_LLM_BASE_URL=https://api.openai.com/v1   # 或任何 OpenAI 兼容接口
@@ -108,8 +139,12 @@ set AQ_LLM_API_KEY=sk-...
 set AQ_LLM_MODEL=gpt-4o-mini
 ```
 
-配置后自动启用；任何失败都会回退到本地规则规划器，不影响演示。
-核心计算（读取/清洗/统计/超标/绘图）始终基于本地数据与自定义工具，大模型只做任务拆解。
+也可以写入项目根目录的 `.env` 文件（`AQ_LLM_BASE_URL=...` 每行一项），
+启动时自动加载。网页版顶部会显示当前规划来源（LLM / 本地规则）。
+
+**容错设计**：LLM 超时、返回非 JSON、工具名不在白名单、参数越界等情况，
+全部自动回退到本地规则规划器，演示不中断。核心计算（读取/清洗/统计/超标/绘图）
+始终基于本地数据与自定义工具，大模型只负责任务拆解，不碰任何数字。
 
 ## 演示建议（60 分钟）
 

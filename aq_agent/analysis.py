@@ -41,22 +41,39 @@ def monthly_trend(df: pd.DataFrame, cities, pollutant: str, year=None):
 def exceed_days_by_province(df: pd.DataFrame, pollutant: str, year=None, limit_kind=None):
     """各省份超标天数统计。
 
-    返回列：有效天数、超标天数、占全国比例%（合计=100%，可校验）、省内超标率%。
+    返回列：省份、有效天数、超标天数、占全国比例%（合计=100%，可校验）、省内超标率%。
+    """
+    return group_exceed_days(df, pollutant, "省份", "省份", limit_kind)
+
+
+def group_exceed_days(df: pd.DataFrame, pollutant: str, group_col: str,
+                      label: str, limit_kind=None):
+    """按任意分组（省份/季节/南北方…）统计超标天数。
+
+    group_col: df 中已存在的分组列名；label: 输出表的分组列名。
+    返回列：label、有效天数、超标天数、占全国比例%、组内超标率%。
     """
     kind = limit_kind or config.DEFAULT_LIMIT_KIND[pollutant]
     col = config.DAILY_JUDGE_COL[pollutant]
     limit = config.GB3095_GRADE2[pollutant][kind]
-    d = df
-    if year is not None:
-        d = d[d["日期"].dt.year == year]
-    valid = d[d[col].notna()]
-    total = valid.groupby("省份").size()
-    exceed = valid[valid[col] > limit].groupby("省份").size()
+    d = df[df[col].notna()]
+    total = d.groupby(group_col).size()
+    exceed = d[d[col] > limit].groupby(group_col).size()
     res = pd.DataFrame({"有效天数": total, "超标天数": exceed}).fillna(0)
     res["超标天数"] = res["超标天数"].astype(int)
     res["占全国比例%"] = (res["超标天数"] / res["超标天数"].sum() * 100).round(1)
-    res["省内超标率%"] = (res["超标天数"] / res["有效天数"] * 100).round(1)
-    return res.sort_values("超标天数", ascending=False), limit
+    res["组内超标率%"] = (res["超标天数"] / res["有效天数"] * 100).round(1)
+    res = res.sort_values("超标天数", ascending=False)
+    res.index.name = label
+    return res.reset_index(), limit
+
+
+def month_to_season(m: int) -> str:
+    """月份 → 季节（与 config.SEASONS 一致，含跨年冬季 12-2 月）。"""
+    for s, (a, b) in config.SEASONS.items():
+        if (a <= m <= b) or (a > b and (m >= a or m <= b)):
+            return s
+    return "未知"
 
 
 def city_season_exceed_days(df: pd.DataFrame, city: str, pollutant: str,
@@ -100,6 +117,36 @@ def compare_dimension(df: pd.DataFrame, pollutant: str, year=None, dim="季节")
     return g.sort_values("mean", ascending=False)
 
 
+def province_mean(df: pd.DataFrame, pollutant: str, top=None):
+    """各省平均浓度排名（年均浓度列口径）。"""
+    col = "PM2.5_24h" if pollutant == "PM2.5" else config.DAILY_JUDGE_COL[pollutant]
+    g = df.groupby("省份")[col].agg(["mean", "count"]).dropna(subset=["mean"])
+    g = g.sort_values("mean", ascending=False)
+    if top:
+        g = g.head(top)
+    out = g.reset_index()
+    out.columns = ["省份", "平均浓度", "有效天数"]
+    out["平均浓度"] = out["平均浓度"].round(1)
+    limit = _annual_limit(pollutant)
+    out["是否超标"] = out["平均浓度"].apply(lambda v: "超标" if limit and v > limit else "达标")
+    return out, limit
+
+
+def city_exceed_days(df: pd.DataFrame, pollutant: str, top=5):
+    """城市超标天数排名（默认取超标最多的 top N）。"""
+    kind = config.DEFAULT_LIMIT_KIND[pollutant]
+    col = config.DAILY_JUDGE_COL[pollutant]
+    limit = config.GB3095_GRADE2[pollutant][kind]
+    valid = df[df[col].notna()]
+    exceed = valid[valid[col] > limit].groupby("城市").size()
+    total = valid.groupby("城市").size()
+    res = pd.DataFrame({"有效天数": total, "超标天数": exceed}).fillna(0)
+    res["超标天数"] = res["超标天数"].astype(int)
+    res["超标率%"] = (res["超标天数"] / res["有效天数"] * 100).round(1)
+    res = res.sort_values("超标天数", ascending=False).head(top)
+    return res.reset_index(), limit
+
+
 # ---------- 异常检测 ----------
 
 def detect_anomalies(df: pd.DataFrame, city: str, pollutant: str, year=None, k=3.0):
@@ -127,7 +174,7 @@ def detect_anomalies(df: pd.DataFrame, city: str, pollutant: str, year=None, k=3
 def validate_share(res: pd.DataFrame):
     """占比类结果校验：占全国比例之和应为 100%。"""
     s = res["占全国比例%"].sum()
-    return abs(s - 100) < 1.0, f"各省份占全国比例合计 {s:.1f}%"
+    return abs(s - 100) < 1.0, f"占全国比例合计 {s:.1f}%"
 
 
 def validate_rank(res: pd.DataFrame):

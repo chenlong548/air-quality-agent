@@ -19,6 +19,30 @@ def data_file(year: int) -> str:
     return os.path.join(PROCESSED_DIR, f"air_quality_{year}.csv")
 
 
+def load_env_file(path=None):
+    """加载项目根目录 .env 中的 AQ_LLM_* 配置（不覆盖已存在的环境变量）。
+
+    用法：把 AQ_LLM_BASE_URL / AQ_LLM_API_KEY / AQ_LLM_MODEL 写进项目根目录
+    .env 文件（每行 KEY=VALUE，# 开头为注释），启动时自动生效。
+    """
+    if path is None:
+        path = os.path.join(PROJECT_ROOT, ".env")
+    if not os.path.isfile(path):
+        return {}
+    loaded = {}
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key, value = key.strip(), value.strip().strip('"').strip("'")
+            if key.startswith("AQ_LLM_") and key not in os.environ:
+                os.environ[key] = value
+                loaded[key] = value
+    return loaded
+
+
 # ---------------- GB 3095-2012《环境空气质量标准》二级限值 ----------------
 # 浓度单位：μg/m³（CO 为 mg/m³）。annual=年平均，24h=24小时平均，
 # 8h=日最大8小时平均，1h=1小时平均。

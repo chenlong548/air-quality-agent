@@ -4,3 +4,5 @@ outputs/charts/*.png
 outputs/reports/*.html
 outputs/logs/
 _data_tmp/
+.env
+*.zip

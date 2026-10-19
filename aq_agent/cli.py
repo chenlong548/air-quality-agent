@@ -40,6 +40,11 @@ class CLI:
         if not years:
             raise SystemExit("未找到数据文件，请先运行 scripts/prepare_data.py 或查看 data/DATASET.md")
         self.year = year or max(years)
+        loaded = config.load_env_file()
+        llm_on = bool(os.environ.get("AQ_LLM_BASE_URL") and os.environ.get("AQ_LLM_API_KEY"))
+        if loaded:
+            print(f"[配置] 已从 .env 加载: {', '.join(loaded)}")
+        print(f"[启动] 规划器：{'LLM function calling' if llm_on else '本地规则（未配置 Key，无网可跑）'}")
         print(f"[启动] 加载数据集 air_quality_{self.year}.csv（分片读取）...")
         df, report = load_dataset(config.data_file(self.year))
         self.agent = ReActAgent(df, report, self.memory, self.year)
