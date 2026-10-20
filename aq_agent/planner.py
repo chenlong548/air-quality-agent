@@ -21,15 +21,18 @@ from . import config
 
 CITY_NAMES = sorted(CITY_TO_PROVINCE.keys(), key=len, reverse=True)
 
-POLLUTANTS = ["PM2.5", "PM10", "O3", "SO2", "NO2", "CO"]
+POLLUTANTS = ["PM2.5", "PM10", "O3", "SO2", "NO2", "CO", "AQI"]
 
+# 注意：Python re 的 \b 在中英文交界处失效（中文也算 \w），
+# 因此 CO/AQI 这类纯字母词用 ASCII 边界断言 (?<![a-zA-Z])…(?![a-zA-Z0-9])。
 POLLUTANT_PATTERNS = [
     ("PM2.5", [r"pm2\.?5", r"细颗粒物"]),
     ("PM10", [r"pm10", r"pm\s*10", r"可吸入颗粒物"]),
     ("O3", [r"o₃", r"o3", r"臭氧"]),
     ("SO2", [r"so₂", r"so2", r"二氧化硫"]),
     ("NO2", [r"no₂", r"no2", r"二氧化氮"]),
-    ("CO", [r"\bco\b", r"一氧化碳"]),
+    ("AQI", [r"(?<![a-zA-Z])aqi(?![a-zA-Z0-9])", r"空气质量指数"]),
+    ("CO", [r"(?<![a-zA-Z])co(?![a-zA-Z0-9])", r"一氧化碳"]),
 ]
 
 INTENT_PATTERNS = [
@@ -68,6 +71,8 @@ class TaskPlan:
     dim: str = "季节"
     source: str = "rule"           # rule / llm
     thoughts: list = field(default_factory=list)
+    out_of_scope: bool = False     # True=问题超出数据能力范围（诚实拒答，不硬答）
+    scope_reason: str = ""
 
     # ---- 兼容旧接口的属性 ----
     @property
@@ -113,10 +118,11 @@ TOOL_SPECS = {
         "args": {
             "group_by": "city=按城市 | province=按省份 | season=按季节 | north_south=按南北方",
             "metric": "mean=平均浓度 | exceed_days=超标天数统计",
-            "pollutant": "PM2.5 / PM10 / O3 / SO2 / NO2 / CO",
+            "pollutant": "PM2.5 / PM10 / O3 / SO2 / NO2 / CO / AQI",
             "cities": "可选，限定城市列表，如 ['北京','上海']",
             "year": "可选，年份，如 2024",
-            "top_n": "可选，返回前 N 行，默认 5",
+            "top_n": "可选，返回前 N 行，默认 5；需要全量排名时用 500（数据集共 375 个城市）",
+            "order": "可选，asc=浓度最低在前 | desc=最高在前（默认）。问「最好/最清洁/最低」用 asc，问「最高/最重/最差」用 desc",
         },
     },
     "trend": {
@@ -133,7 +139,7 @@ TOOL_SPECS = {
         "args": {"city": "城市名", "pollutant": "污染物", "year": "可选，年份"},
     },
     "check_standard": {
-        "desc": "查询 GB 3095-2012 二级标准限值口径，用于超标研判。",
+        "desc": "查询限值口径（六项污染物为 GB 3095-2012 二级标准，AQI 为 HJ 633-2012），用于超标研判。",
         "args": {"pollutant": "污染物", "kind": "可选 annual/24h/8h/1h"},
     },
     "plot_chart": {
@@ -151,19 +157,33 @@ VALID_TOOLS = set(TOOL_SPECS)
 LLM_SYS_PROMPT = """你是空气质量时序分析 Agent 的任务规划器。用户提出一个自然语言问题，你需要为它生成一条「工具调用链」（steps），让执行引擎按链调度工具完成分析。
 
 数据集事实（不要臆造）：
-- 来源：中国环境监测总站公开数据（CN-AIR），覆盖全国 375 个城市，逐日六项污染物 + AQI；
-- 污染物与判定口径：PM2.5(24h 平均)、PM10(24h)、SO2(24h)、NO2(24h)、O3(日最大8h 平均)、CO(24h)；
+- 来源：中国环境监测总站公开数据（CN-AIR），覆盖全国 375 个城市，逐日六项污染物浓度 + AQI；
+- 污染物与判定口径：PM2.5(24h 平均)、PM10(24h)、SO2(24h)、NO2(24h)、O3(日最大8h 平均)、CO(24h)、AQI(日值，>100 为超标日)；
 - 可用年份：{years}（未提年份用默认年份 {default_year}）。
+
+能力边界（重要）：
+- 数据里只有上述污染物浓度与 AQI，没有气温、降水、湿度、风速、天气现象等气象要素；
+- 只覆盖中国城市，没有其他国家/地区；
+- 若用户问题超出该范围（问气象要素、外国、闲聊问候、与空气质量数据分析无关的请求），
+  输出 {{"out_of_scope": true, "reason": "一句话说明为什么无法回答，并提示本智能体能分析什么"}}，不要强行规划 steps；
+- 注意区分：雾霾、沙尘、空气、污染、蓝天指数、呼吸健康相关的问题属于本智能体范围（对应污染物分析）。
 
 可用工具（function calling 风格）：
 {tools}
 
+规划要点：
+1. 多部分问题（一个问句里有多个子问题）必须为每个可回答的子问题都安排对应的 aggregate/trend/…步骤，全部结果都会保留并展示，不要只答最后一个；
+2. 「最高/最重/最差/污染最严重」用 order=desc（默认）；「最低/最好/最清洁/空气质量最优」用 order=asc；
+3. 需要全部城市参与排名、或「某城市排全国第几」这类定位问题时，用 top_n=500 拿全量表；
+4. 「达标城市有几个」= 全量 top_n=500 后由结果表的「是否超标」列统计；
+5. 城市名写常见名即可（如 北京、和田、首都→北京），系统会自动校正为标准名；
+6. 若用户问的年份不在「可用年份」里，在 thoughts 第一条明确说明「数据集无 XXXX 年，已改用 YYYY 年」，再用可用年份规划——不要静默替换。
+
 输出要求：
 1. 只输出一个 JSON 对象，不要输出任何其他文字；
-2. 格式：{{"thoughts": ["规划思路…"], "pollutant": "PM2.5", "steps": [{{"tool": "工具名", "args": {{...}}, "thought": "这一步为什么这样做"}}, ...]}}；
+2. 格式：{{"thoughts": ["规划思路…"], "pollutant": "PM2.5", "steps": [{{"tool": "工具名", "args": {{...}}, "thought": "这一步为什么这样做"}}, ...]}}；out_of_scope 时输出 {{"out_of_scope": true, "reason": "…"}}；
 3. steps 中第一个工具必须是 load_data，最后一个建议是 validate；plot_chart 可选，放在产出统计结果之后；
-4. 城市名写常见名即可（如 北京、和田），系统会自动校正为标准名；
-5. 每步都要有 thought 字段，写清楚这一步在解决用户问题的哪个部分。
+4. 每步都要有 thought 字段，写清楚这一步在解决用户问题的哪个部分。
 """
 
 
@@ -277,23 +297,37 @@ def _valid_year(y, default_year=None):
     return y if 2000 <= y <= 2100 else default_year
 
 
+def _valid_top_n(v, default=5):
+    try:
+        v = int(v)
+    except (TypeError, ValueError):
+        return default
+    return max(1, min(500, v))
+
+
+# 规则兜底用的域外问题关键词（LLM 不可用时的最后防线）
+_OUT_OF_SCOPE_RE = re.compile(
+    r"气温|温度|降雨|降水量|湿度|风速|风力|大风|台风|天气(?!污染)|下雪|降雪|日照|日出|日落|"
+    r"你好|您好|在吗|谢谢|再见|hello|hi\b|help me|你是谁|自我介绍", re.I)
+
+
 # ---------------- 规则规划器：意图 → 同构 steps ----------------
 
-def build_steps(intent, pollutant, cities, year, season, top_n, dim, chart):
+def build_steps(intent, pollutant, cities, year, season, top_n, dim, chart, order="desc"):
     """按识别出的槽位生成标准工具调用链（与 LLM 路径同构）。"""
     S = Step
     load = S("load_data", {},
              "先分片读取本地数据集并清洗，确保后续统计基于真实监测数据")
     ck = S("check_standard", {"pollutant": pollutant},
-           f"对照 GB 3095-2012 二级限值，明确 {pollutant} 的判定口径")
+           f"对照限值口径，明确 {pollutant} 的判定标准")
     val = S("validate", {}, "对统计结果做合理性校验，降低规划错误风险")
     plot = lambda c: S("plot_chart", {"chart": c}, f"将统计结果可视化为{c}图")
 
     if intent == "annual_rank":
         return [load,
                 S("aggregate", {"group_by": "city", "metric": "mean", "pollutant": pollutant,
-                                "year": year, "top_n": top_n},
-                  f"按城市分组计算 {pollutant} 年均浓度，取 TOP{top_n}"),
+                                "year": year, "top_n": top_n, "order": order},
+                  f"按城市分组计算 {pollutant} 年均浓度，取{'浓度最低' if order == 'asc' else '浓度最高'}前 {top_n} 个"),
                 ck, plot(chart or "bar"), val]
     if intent == "monthly_trend":
         return [load,
@@ -328,14 +362,23 @@ def build_steps(intent, pollutant, cities, year, season, top_n, dim, chart):
     # 默认：年均排名
     return [load,
             S("aggregate", {"group_by": "city", "metric": "mean", "pollutant": pollutant,
-                            "year": year, "top_n": top_n},
-              f"按城市分组计算 {pollutant} 年均浓度，取 TOP{top_n}"),
+                            "year": year, "top_n": top_n, "order": order},
+              f"按城市分组计算 {pollutant} 年均浓度，取前 {top_n} 个"),
             ck, plot(chart or "bar"), val]
 
 
 def rule_plan(question: str, memory=None, default_year=None) -> TaskPlan:
     """本地规则规划器（无网无 Key 兜底）。"""
     p = TaskPlan(question=question, source="rule")
+
+    # 域外问题兜底：LLM 不可用时至少要诚实拒答，不能硬答空气质量
+    if _OUT_OF_SCOPE_RE.search(question):
+        p.out_of_scope = True
+        p.scope_reason = ("该问题涉及气象要素或日常对话，不在本智能体的数据范围内"
+                          "（数据集仅含六项污染物浓度与 AQI 的日均时序）。")
+        p.thoughts.append(f"[规划] 规则模式判定问题超出数据能力范围，已拒答")
+        return p
+
     p.pollutant = _find_pollutant(question)
     intent = _find_intent(question)
     p.year = _find_year(question, default_year)
@@ -344,6 +387,7 @@ def rule_plan(question: str, memory=None, default_year=None) -> TaskPlan:
     p.audience = _find_audience(question)
     p.cities = _find_cities(question)
     p.dim = "north_south" if ("南方" in question or "北方" in question) else "season"
+    order = "asc" if re.search(r"最低|最好|最优|最清洁|空气好", question) else "desc"
 
     # 多轮记忆：「这几个城市」等指代继承上一轮城市
     if not p.cities and memory and memory.last_cities:
@@ -364,8 +408,8 @@ def rule_plan(question: str, memory=None, default_year=None) -> TaskPlan:
     chart = _find_chart(question, intent)
     p.chart = chart
     p.steps = build_steps(intent, p.pollutant, p.cities, p.year, p.season,
-                          p.top_n, p.dim, chart)
-    p.thoughts.append(f"[规划] 识别意图={intent}, 污染物={p.pollutant}")
+                          p.top_n, p.dim, chart, order)
+    p.thoughts.append(f"[规划] 识别意图={intent}, 污染物={p.pollutant}, 方向={order}")
     p.thoughts.append(f"[规划] 参数: 年份={p.year}, 城市={p.cities or '全国'}, "
                       f"季节={p.season or '全年'}, TOP={p.top_n}, 图表={chart}")
     p.thoughts.append(f"[规划] 生成 {len(p.steps)} 步工具调用链: "
@@ -382,6 +426,9 @@ def _clean_args(tool, args):
         a["group_by"] = a.get("group_by") if a.get("group_by") in \
             ("city", "province", "season", "north_south") else "city"
         a["metric"] = a.get("metric") if a.get("metric") in ("mean", "exceed_days") else "mean"
+    if "order" in a:
+        if a.get("order") not in ("asc", "desc"):
+            a["order"] = "desc"
     if "pollutant" in a:
         a["pollutant"] = _valid_pollutant(a.get("pollutant")) or "PM2.5"
     if "year" in a:
@@ -390,7 +437,7 @@ def _clean_args(tool, args):
             a.pop("year")
     if "top_n" in a:
         try:
-            a["top_n"] = max(1, min(50, int(a["top_n"])))
+            a["top_n"] = max(1, min(500, int(a["top_n"])))
         except (TypeError, ValueError):
             a.pop("top_n")
     if "cities" in a:
@@ -432,6 +479,25 @@ def _sanitize_llm_steps(data, question):
     return steps
 
 
+def _memory_context(memory) -> str:
+    """把多轮记忆整理为注入 LLM 的上下文文本（LLM 路径的指代继承）。"""
+    if memory is None:
+        return ""
+    parts = []
+    if memory.history:
+        parts.append(f"上一轮问题：{memory.history[-1]['question']}")
+    if memory.last_cities:
+        parts.append(f"上一轮分析城市：{'、'.join(memory.last_cities)}")
+    if memory.last_pollutant:
+        parts.append(f"上一轮污染物：{memory.last_pollutant}")
+    if memory.last_year:
+        parts.append(f"上一轮年份：{memory.last_year}")
+    if not parts:
+        return ""
+    return ("\n\n[对话上下文] 若本问使用「那/这/呢/上述/继续/也/还」等指代或省略主语，"
+            "请继承下列上下文补全省略的要素：\n" + "\n".join(parts))
+
+
 def llm_plan(question: str, memory=None, default_year=None, available_years=None) -> TaskPlan:
     """调用 OpenAI 兼容接口做规划；任何失败都抛异常，由调用方回退到规则规划器。"""
     base = os.environ.get("AQ_LLM_BASE_URL", "").rstrip("/")
@@ -444,7 +510,7 @@ def llm_plan(question: str, memory=None, default_year=None, available_years=None
         "model": model,
         "messages": [
             {"role": "system", "content": _llm_sys_prompt(default_year, available_years)},
-            {"role": "user", "content": question},
+            {"role": "user", "content": question + _memory_context(memory)},
         ],
         "temperature": 0,
     }
@@ -463,9 +529,24 @@ def llm_plan(question: str, memory=None, default_year=None, available_years=None
     plan_data = json.loads(m.group(0))
 
     p = TaskPlan(question=question, source="llm")
+
+    # 能力边界：LLM 判定问题超出数据范围 → 诚实拒答，不硬答
+    if plan_data.get("out_of_scope"):
+        p.out_of_scope = True
+        p.scope_reason = str(plan_data.get("reason", "")).strip()[:300]
+        p.thoughts.append(f"[规划] LLM 判定问题超出数据能力范围：{p.scope_reason}")
+        return p
+
     p.pollutant = _valid_pollutant(plan_data.get("pollutant")) or "PM2.5"
     p.cities = normalize_cities(plan_data.get("cities") if isinstance(plan_data.get("cities"), list) else [])
     p.year = _valid_year(plan_data.get("year"), default_year)
+    p.top_n = _valid_top_n(plan_data.get("top_n"), 5)
+    if plan_data.get("season") in ("春季", "夏季", "秋季", "冬季", "全年"):
+        p.season = plan_data["season"]
+    if plan_data.get("chart") in ("auto", "line", "bar", "pie"):
+        p.chart = plan_data["chart"]
+    if plan_data.get("dim") in ("season", "north_south"):
+        p.dim = plan_data["dim"]
     p.steps = _sanitize_llm_steps(plan_data, question)
     for t in (plan_data.get("thoughts") or [])[:5]:
         if isinstance(t, str) and t.strip():

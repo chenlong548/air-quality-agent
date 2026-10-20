@@ -58,6 +58,9 @@ def _style_ax(ax):
 
 
 def _dark_legend(ax):
+    handles, labels = ax.get_legend_handles_labels()
+    if not handles:
+        return None
     leg = ax.legend(facecolor=BG, edgecolor=GRID, fontsize=9)
     for t in leg.get_texts():
         t.set_color(FG)

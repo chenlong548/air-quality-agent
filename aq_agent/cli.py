@@ -106,6 +106,11 @@ def main():
         if args[0] == "--year" and len(args) > 1:
             year = int(args[1])
             args = args[2:]
+            if not os.path.exists(config.data_file(year)):
+                available = discover_years()
+                print(f"[错误] 数据集中没有 {year} 年的文件（可用年份：{available}）。"
+                      f"如需准备 {year} 年数据，请运行 scripts/fetch_data.py 与 scripts/prepare_data.py")
+                return
         if args:
             cli = CLI(year)
             cli.handle(" ".join(args))

@@ -140,6 +140,8 @@ button:disabled{background:#1c2a4a;color:var(--faint);box-shadow:none;cursor:not
 @keyframes msgInL{from{opacity:0;transform:translateX(-18px)}to{opacity:1;transform:none}}
 .loading::after{content:"▊";margin-left:3px;color:var(--cyan-hi);animation:blink 1s steps(1) infinite}
 .final::before{content:"◈ ANALYSIS RESULT · 分析结果";display:block;font-family:var(--mono);font-size:10px;letter-spacing:.26em;color:var(--faint);margin-bottom:9px}
+.rblock{margin:12px 0}
+.rblock-title{font-family:var(--mono);font-size:11px;letter-spacing:.08em;color:var(--cyan);margin-bottom:6px}
 button{position:relative;overflow:hidden}
 button::after{content:"";position:absolute;inset:0;background:linear-gradient(105deg,transparent 40%,rgba(255,255,255,.42) 50%,transparent 60%);transform:translateX(-130%);transition:transform .65s ease;pointer-events:none}
 button:hover::after{transform:translateX(130%)}

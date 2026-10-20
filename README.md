@@ -50,13 +50,24 @@ python run.py
 | 工具 | 作用 | 关键参数 |
 |---|---|---|
 | load_data | 分片读取并清洗数据集 | — |
-| aggregate | 分组聚合 | group_by=city/province/season/north_south，metric=mean/exceed_days，pollutant，cities，year，top_n |
+| aggregate | 分组聚合 | group_by=city/province/season/north_south，metric=mean/exceed_days，pollutant（六项+AQI），cities，year，top_n（全量排名用 500），order=asc/desc（最低/最高在前） |
 | trend | 城市月度趋势 | cities，pollutant，year |
 | season_exceed | 单城市单季节超标天数 | city，season，pollutant，year |
 | anomaly | MAD 3σ 异常检测 | city，pollutant，year |
-| check_standard | GB 3095-2012 限值口径 | pollutant，kind |
-| plot_chart | 可视化（auto 按结果选图型） | chart=auto/line/bar/pie |
-| validate | 结果合理性校验 | — |
+| check_standard | 限值口径（GB 3095-2012 / AQI 按 HJ 633-2012） | pollutant，kind |
+| plot_chart | 可视化（auto 按结果选图型；>40 行自动跳过绘图） | chart=auto/line/bar/pie |
+| validate | 结果合理性校验（多结果块逐块校验） | — |
+
+## 泛化能力与诚实拒答
+
+- **多部分问题**：每个子问题独立成结果块，全部保留展示（不再被最后一步覆盖）；
+- **语义方向**：「最好/最低」→ order=asc，「最差/最高」→ order=desc，不再答反；
+- **全量排名**：top_n 上限 500（375 城），「排全国第几」「多少个城市达标」直接在研判里给答案（含目标城市名次定位、达标/超标计数、两城差值）；
+- **AQI 一等公民**：问 AQI 不再静默替换成 PM2.5（超标判定依据 HJ 633-2012，>100 为超标日）；
+- **年份越界**：问 2023/2025 → 明确提示数据覆盖范围并拦截（trend 空表不再崩溃），LLM 自动改用可用年份时会在 thoughts 中说明；
+- **能力边界**：气象要素/外国/闲聊 → LLM 输出 `out_of_scope` 诚实拒答并引导可分析什么（规则兜底模式亦有关键词拒答）；
+- **多轮记忆**：LLM 路径注入上一轮上下文，「那上海呢」「这几个城市」式追问可正确继承；
+- **回归工具**：`tests/generalization_audit.py`（20 条全新问法自动审计）、`tests/audit_focus.py`（针对性复验），审计日志落盘 `outputs/logs/generalization_audit.txt`。
 
 ## 流式推送架构（网页版）
 

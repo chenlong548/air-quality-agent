@@ -27,6 +27,14 @@ class Memory:
             "seconds": round(seconds, 2),
         })
 
+    def note_out_of_scope(self, plan):
+        """拒答轮只记历史（意图统计用），不污染城市/污染物记忆。"""
+        self.history.append({
+            "question": plan.raw, "intent": "out_of_scope",
+            "pollutant": None, "year": None,
+            "seconds": 0.0,
+        })
+
     def stats(self):
         """任务日志看板：高频任务、平均耗时。"""
         if not self.history:

@@ -117,11 +117,11 @@ def compare_dimension(df: pd.DataFrame, pollutant: str, year=None, dim="季节")
     return g.sort_values("mean", ascending=False)
 
 
-def province_mean(df: pd.DataFrame, pollutant: str, top=None):
+def province_mean(df: pd.DataFrame, pollutant: str, top=None, ascending=False):
     """各省平均浓度排名（年均浓度列口径）。"""
     col = "PM2.5_24h" if pollutant == "PM2.5" else config.DAILY_JUDGE_COL[pollutant]
     g = df.groupby("省份")[col].agg(["mean", "count"]).dropna(subset=["mean"])
-    g = g.sort_values("mean", ascending=False)
+    g = g.sort_values("mean", ascending=ascending)
     if top:
         g = g.head(top)
     out = g.reset_index()
@@ -132,7 +132,7 @@ def province_mean(df: pd.DataFrame, pollutant: str, top=None):
     return out, limit
 
 
-def city_exceed_days(df: pd.DataFrame, pollutant: str, top=5):
+def city_exceed_days(df: pd.DataFrame, pollutant: str, top=5, ascending=False):
     """城市超标天数排名（默认取超标最多的 top N）。"""
     kind = config.DEFAULT_LIMIT_KIND[pollutant]
     col = config.DAILY_JUDGE_COL[pollutant]
@@ -143,7 +143,7 @@ def city_exceed_days(df: pd.DataFrame, pollutant: str, top=5):
     res = pd.DataFrame({"有效天数": total, "超标天数": exceed}).fillna(0)
     res["超标天数"] = res["超标天数"].astype(int)
     res["超标率%"] = (res["超标天数"] / res["有效天数"] * 100).round(1)
-    res = res.sort_values("超标天数", ascending=False).head(top)
+    res = res.sort_values("超标天数", ascending=ascending).head(top)
     return res.reset_index(), limit
 
 
@@ -173,14 +173,20 @@ def detect_anomalies(df: pd.DataFrame, city: str, pollutant: str, year=None, k=3
 
 def validate_share(res: pd.DataFrame):
     """占比类结果校验：占全国比例之和应为 100%。"""
+    if res is None or len(res) == 0:
+        return False, "无数据行（先检查年份/城市/污染物是否在数据范围内）"
     s = res["占全国比例%"].sum()
     return abs(s - 100) < 1.0, f"占全国比例合计 {s:.1f}%"
 
 
 def validate_rank(res: pd.DataFrame):
     """排名类结果校验：单调递减且样本量充足。"""
-    vals = res["年均浓度"].tolist()
-    mono = all(vals[i] >= vals[i + 1] for i in range(len(vals) - 1))
+    if res is None or len(res) == 0:
+        return False, "无数据行（先检查年份/城市/污染物是否在数据范围内）"
+    vals = res[res.columns[1]].tolist()
+    dec = all(vals[i] >= vals[i + 1] for i in range(len(vals) - 1))
+    inc = all(vals[i] <= vals[i + 1] for i in range(len(vals) - 1))
+    mono = dec or inc   # 升序（最低在前）与降序（最高在前）都算合法排名
     enough = bool((res["有效天数"] > 300).all())
     return mono and enough, f"单调性={mono}, 有效天数均>300={enough}"
 
@@ -197,7 +203,9 @@ def _kind_desc(kind):
 
 
 def format_limit_text(pollutant, kind=None):
-    """生成国标限值说明文案。"""
+    """生成限值说明文案（AQI 走 HJ 633-2012 口径，其余为 GB 3095-2012）。"""
+    if pollutant == "AQI":
+        return config.AQI_LIMIT_NOTE
     std = config.GB3095_GRADE2[pollutant]
     kind = kind or config.DEFAULT_LIMIT_KIND[pollutant]
     parts = []
