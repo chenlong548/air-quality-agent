@@ -2,6 +2,7 @@
 """可视化：matplotlib 折线 / 柱状 / 饼图，中文字体自动探测，深空遥测主题。"""
 import datetime
 import os
+import uuid
 
 import matplotlib
 matplotlib.use("Agg")  # 无界面环境渲染，比赛现场不弹窗
@@ -68,13 +69,14 @@ def _dark_legend(ax):
 
 
 def _save(fig, kind):
-    """保存图表：文件名带毫秒时间戳，保证每次提问的图都是当次真实计算结果。"""
+    """保存图表：文件名带毫秒时间戳 + uuid，保证每次提问的图都是当次真实计算结果，
+    且并发渲染（网页版多人同时提问）时不会同名撞车。"""
     setup_chinese_font()
     fig.patch.set_facecolor(BG)
     for ax in fig.axes:
         ax.set_facecolor(BG)
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
-    name = f"chart_{kind}_{ts}.png"
+    name = f"chart_{kind}_{ts}_{uuid.uuid4().hex[:6]}.png"
     path = os.path.join(config.CHART_DIR, name)
     fig.savefig(path, bbox_inches="tight", facecolor=BG)
     plt.close(fig)

@@ -9,12 +9,18 @@
 然后浏览器访问 http://127.0.0.1:8611
 
 流式架构（SSE + 消息队列节流）：
-    前端 EventSource 连接 GET /api/stream?q=...
+    前端 EventSource 连接 GET /api/stream?q=...&sid=...
     → Agent 在后台线程运行，每一步（Thought/Action/Observation）事件写入
       queue.Queue（消息队列缓冲）；
     → SSE 生成器按单调时钟节流：相邻两个事件间隔不足 --interval 秒时
       sleep 补齐，再依次推送，保证前端能看清每一步调度；
     → 前端逐条渲染调用链，图表、结论最后到位。
+
+并发模型（每个请求独立 Agent，无全局串行锁）：
+    数据集在 AppState 中只加载一次且全程只读；每次提问现场创建独立的
+    ReActAgent 实例（中间态 _ctx 不共享），多人同时提问并行执行；
+    多轮记忆按 sid（sessionStorage 生成）隔离，支持「那上海呢」式追问，
+    且不同会话的记忆互不污染。
 """
 import argparse
 import json
@@ -183,6 +189,10 @@ button:hover::after{transform:translateX(130%)}
 </div>
 <script>
 const chat = document.getElementById('chat');
+// ---- 会话标识：同一标签页共享多轮记忆，不同标签页/浏览器互不串扰 ----
+let SID = sessionStorage.getItem('aq_sid');
+if(!SID){ SID = 's' + Date.now().toString(36) + Math.random().toString(36).slice(2,8);
+  sessionStorage.setItem('aq_sid', SID); }
 // ---- 遥测时钟 ----
 function tick(){ const d=new Date(), p=n=>String(n).padStart(2,'0');
   document.getElementById('clock').textContent =
@@ -252,7 +262,7 @@ function send(){
     cur = s; curNo = no;
     return s;
   }
-  es = new EventSource('/api/stream?q=' + encodeURIComponent(q));
+  es = new EventSource('/api/stream?q=' + encodeURIComponent(q) + '&sid=' + SID);
   es.onmessage = (e) => {
     let ev; try { ev = JSON.parse(e.data); } catch(err){ return; }
     const planning = document.getElementById('planning');
@@ -338,7 +348,18 @@ function send(){
 
 
 class AppState:
-    """全局单例：数据集与 Agent 只加载一次，请求间共享。"""
+    """全局共享态：数据集只加载一次（全程只读），会话记忆按 sid 隔离。
+
+    并发设计（不足③）：
+      - 数据集/清洗报告不可变，多线程只读groupby 安全；
+      - 每个请求现场创建独立的 ReActAgent 实例（Agent 只在一次 run 内持有
+        _ctx 中间态），因此多人同时提问并行执行、互不排队；
+      - 多轮记忆（「那上海呢」式追问）按前端 sessionStorage 生成的 sid 归属，
+        不同浏览器/标签页的记忆互不串扰；
+      - 会话表有容量上限（LRU 淘汰），防止长期运行内存泄漏。
+    """
+
+    MAX_SESSIONS = 128
 
     def __init__(self):
         years = discover_years()
@@ -347,9 +368,28 @@ class AppState:
         self.year = max(years)
         df, report = load_dataset(config.data_file(self.year))
         self.clean_report = report
-        self.agent = ReActAgent(df, report, Memory(), self.year)
-        self.lock = threading.Lock()
+        self.df = df
+        self._sessions = {}          # sid -> Memory（dict 保序 = 天然 LRU）
+        self._sessions_lock = threading.Lock()
         print(f"[web] 数据就绪：{report['清洗后行数']} 行 / {report['城市数']} 城市 / {report['日期范围']}")
+
+    def memory_for(self, sid):
+        """按会话取/建记忆（并发安全）；sid 为空时返回一次性记忆。"""
+        if not sid:
+            return Memory()
+        with self._sessions_lock:
+            mem = self._sessions.pop(sid, None)   # 取出后放回尾部 = LRU 刷新
+            if mem is None:
+                while len(self._sessions) >= self.MAX_SESSIONS:
+                    self._sessions.pop(next(iter(self._sessions)))
+                mem = Memory()
+            self._sessions[sid] = mem
+            return mem
+
+    def new_agent(self, sid=""):
+        """为单个请求创建独立 Agent（无全局锁，天然支持并发）。"""
+        return ReActAgent(self.df, self.clean_report,
+                          self.memory_for(sid), self.year)
 
 
 STATE = None
@@ -400,7 +440,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
         elif parsed.path == "/api/stream":
-            self._sse_stream(query.get("q", [""])[0])
+            self._sse_stream(query.get("q", [""])[0], query.get("sid", [""])[0])
         elif parsed.path == "/api/status":
             llm = bool(os.environ.get("AQ_LLM_BASE_URL") and os.environ.get("AQ_LLM_API_KEY"))
             self._json({"llm": llm, "model": os.environ.get("AQ_LLM_MODEL", "")})
@@ -409,8 +449,11 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------- SSE 流式端点 ----------
 
-    def _sse_stream(self, question):
-        """Agent 后台运行，事件入消息队列，按 ≥MIN_GAP 秒节流依次推送。"""
+    def _sse_stream(self, question, sid=""):
+        """Agent 后台运行，事件入消息队列，按 ≥MIN_GAP 秒节流依次推送。
+
+        每个连接独立 Agent 实例 + 按 sid 隔离的记忆：多人同时提问并行执行。
+        """
         if not question.strip():
             self._json({"ok": False, "error": "问题不能为空"})
             return
@@ -424,8 +467,7 @@ class Handler(BaseHTTPRequestHandler):
 
         def worker():
             try:
-                with STATE.lock:
-                    STATE.agent.run(question, on_event=evq.put)
+                STATE.new_agent(sid).run(question, on_event=evq.put)
             except Exception as e:
                 evq.put({"kind": "error", "text": f"{type(e).__name__}: {e}"})
             finally:
@@ -474,8 +516,7 @@ class Handler(BaseHTTPRequestHandler):
             if not question:
                 self._json({"ok": False, "error": "问题不能为空"})
                 return
-            with STATE.lock:
-                result = STATE.agent.run(question)
+            result = STATE.new_agent(payload.get("sid") or "").run(question)
             concl = build_text_report(result["plan"], result)
             chart_url = ""
             if result.get("图表路径"):

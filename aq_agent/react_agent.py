@@ -5,6 +5,7 @@
 网页版用 SSE 推送给前端逐条渲染；命令行版不传回调，事件自动收集为 trace。
 """
 import os
+import re
 import time
 
 import pandas as pd
@@ -33,6 +34,7 @@ _AUTO_CHART = {
     "annual_rank": "bar", "city_exceed": "bar", "province_mean": "bar",
     "province_share": "pie", "group_share": "pie", "compare": "bar", "trend": "line",
     "season_exceed": "bar", "anomaly": "line",
+    "region_province_top": "bar", "correlation": "bar", "source_profile": "bar",
 }
 
 
@@ -191,6 +193,8 @@ class ReActAgent:
             "trend": self._tool_trend,
             "season_exceed": self._tool_season_exceed,
             "anomaly": self._tool_anomaly,
+            "city_correlation": self._tool_city_correlation,
+            "pollution_source": self._tool_pollution_source,
             "check_standard": self._tool_check_standard,
             "plot_chart": self._tool_plot_chart,
             "validate": self._tool_validate,
@@ -214,6 +218,8 @@ class ReActAgent:
         year = planner._valid_year(args.get("year"), plan.year)
         top_n = args.get("top_n") or plan.top_n
         cities = planner.normalize_cities(args.get("cities")) or list(plan.cities)
+        provinces = [x for x in (args.get("provinces") or []) if x in planner.PROVINCE_NAMES] \
+            or list(getattr(plan, "provinces", []) or [])
         order = args.get("order", "desc")
         self._ctx["_order"] = order
         asc = order == "asc"
@@ -224,8 +230,13 @@ class ReActAgent:
             return False, err, None
 
         d = self.df
-        if cities:
+        # 定位问法（「排全国第几」「多少个达标」）需要全量表：
+        # 此时不能用 cities 过滤，否则排名只剩 1 行、定位失效
+        positioning = bool(re.search(r"第几|排名|达标|多少个|一共|全部", plan.question or ""))
+        if cities and not (top_n >= 300 and positioning):
             d = d[d["城市"].isin(cities)]
+        if provinces:
+            d = d[d["省份"].isin(provinces)]
         if year:
             d = d[d["日期"].dt.year == year]
         if d.empty:
@@ -241,9 +252,21 @@ class ReActAgent:
         elif gb == "city" and metric == "exceed_days":
             out, limit = analysis.city_exceed_days(d, p, top_n, ascending=asc)
             kind, desc = "city_exceed", f"{year_txt}城市{p}超标天数 TOP{top_n}（{dir_txt}）"
+        elif gb == "province" and args.get("split_by") == "north_south":
+            # 分组切片：「南北各自超标最严重的 N 个省份」→ 各组内分别取 TOP N
+            slice_n = int(args.get("top_n") or plan.top_n or 3)
+            out, limit = analysis.region_province_top(d, p, slice_n, metric=metric,
+                                                      ascending=asc)
+            if out.empty:
+                return False, (f"南北方分组切片无数据（年份={year or '全部'}，"
+                               f"污染物={p}）。请检查年份是否在数据范围内"), None
+            m_txt = "超标天数" if metric == "exceed_days" else "平均浓度"
+            kind, desc = ("region_province_top",
+                          f"{year_txt}南北方各自{p}{m_txt} TOP{slice_n}（分组切片）")
         elif gb == "province" and metric == "mean":
             out, limit = analysis.province_mean(d, p, ascending=asc)
-            kind, desc = "province_mean", f"{year_txt}各省{p}平均浓度（{dir_txt}）"
+            scope = f"指定省份（{('、'.join(provinces))}）" if provinces else "各省"
+            kind, desc = "province_mean", f"{year_txt}{scope}{p}平均浓度（{dir_txt}）"
         elif gb == "province" and metric == "exceed_days":
             out, limit = analysis.exceed_days_by_province(d, p)
             kind, desc = "province_share", f"{year_txt}各省{p}超标天数占比"
@@ -333,6 +356,43 @@ class ReActAgent:
         self._save_block("anomaly", (city, hits), desc, None, p, year, obs)
         return True, obs, None
 
+    def _tool_city_correlation(self, args, plan):
+        p = planner._valid_pollutant(args.get("pollutant")) or plan.pollutant
+        year = planner._valid_year(args.get("year"), plan.year)
+        cities = planner.normalize_cities(args.get("cities")) or list(plan.cities)
+        err = self._check_year(year)
+        if err:
+            return False, err, None
+        if len(cities) < 2:
+            return False, (f"相关性分析至少需要两个城市（当前识别到: "
+                           f"{cities or '无'}）。例如「北京和上海的PM2.5污染是否相关」"), None
+        rows, note = analysis.city_correlation(self.df, cities, p, year)
+        if rows.empty:
+            return False, (f"无有效配对数据（城市={cities}，年份={year or '全部'}，"
+                           f"污染物={p}）。请检查城市名/年份是否在数据范围内"), None
+        desc = note
+        obs = f"{desc}：{len(rows)} 组配对\n{df_to_text(rows)}"
+        self._save_block("correlation", rows, desc, None, p, year, obs, cities=cities)
+        return True, obs, None
+
+    def _tool_pollution_source(self, args, plan):
+        p = planner._valid_pollutant(args.get("pollutant")) or plan.pollutant
+        year = planner._valid_year(args.get("year"), plan.year)
+        city = planner.normalize_city(args.get("city")) or \
+            (plan.cities[0] if plan.cities else None) or \
+            (self.memory.last_cities[0] if self.memory.last_cities else None) or "北京"
+        err = self._check_year(year)
+        if err:
+            return False, err, None
+        rows, concl = analysis.pollution_source_profile(self.df, city, p, year)
+        if rows is None or rows.empty:
+            return False, concl, None
+        desc = f"{city} {p} 污染来源特征分析（代理指标）"
+        obs = f"{desc}：{len(rows)} 项指标\n{df_to_text(rows)}\n结论：{concl}"
+        self._save_block("source_profile", rows, desc, None, p, year, obs, cities=[city])
+        self._ctx["results"][-1]["conclusion"] = concl
+        return True, obs, None
+
     def _tool_check_standard(self, args, plan):
         p = planner._valid_pollutant(args.get("pollutant")) or plan.pollutant
         kind = args.get("kind") or config.DEFAULT_LIMIT_KIND.get(p)
@@ -404,6 +464,32 @@ class ReActAgent:
             path = charts.bar_chart(tbl, "省份", "平均浓度",
                                     f"{year_txt}各省{p}平均浓度", unit)
             actual = "bar"
+        elif kind == "region_province_top":
+            plot_df = tbl.copy()
+            plot_df["区域·省份"] = plot_df["区域"] + "·" + plot_df["省份"]
+            y_col = "超标天数" if "超标天数" in plot_df.columns else "平均浓度"
+            path = charts.bar_chart(plot_df, "区域·省份", y_col,
+                                    f"{year_txt}{p}南北方分组切片 TOP{len(tbl)}",
+                                    "天" if y_col == "超标天数" else unit)
+            actual = "bar"
+        elif kind == "correlation":
+            plot_df = tbl.copy()
+            plot_df = plot_df[pd.to_numeric(plot_df["相关系数r"], errors="coerce").notna()]
+            if plot_df.empty:
+                return True, ("有效配对样本均不足 30 天，无法绘制相关性图表"
+                              "——完整结论见结果表格"), None
+            plot_df["城市对"] = plot_df["城市A"] + "–" + plot_df["城市B"]
+            path = charts.bar_chart(plot_df, "城市对", "相关系数r",
+                                    f"{year_txt}{p}日浓度相关系数", "r")
+            actual = "bar"
+        elif kind == "source_profile":
+            plot_df = tbl.copy()
+            plot_df = plot_df[pd.to_numeric(plot_df["数值n"], errors="coerce").notna()]
+            if plot_df.empty:
+                return True, "来源代理指标以定性解读为主，数值项不足，已跳过绘图", None
+            path = charts.bar_chart(plot_df, "指标", "数值n",
+                                    f"{year_txt}{p}来源代理指标", "")
+            actual = "bar"
 
         if not path:
             return False, f"结果类型 {kind} 暂不支持绘图", None
@@ -428,6 +514,17 @@ class ReActAgent:
                     ok, msg = True, f"样本覆盖 {len(tbl)} 个城市，超标天数已排序"
                 elif kind == "province_mean":
                     ok, msg = True, f"样本覆盖 {len(tbl)} 个省份，平均浓度已排序"
+                elif kind == "region_province_top":
+                    groups = tbl["区域"].nunique() if "区域" in tbl.columns else 0
+                    per = tbl.groupby("区域").size().max() if groups else 0
+                    ok, msg = True, f"分组切片：{groups} 个区域 × 每组最多 {per} 省，组内已排序"
+                elif kind == "correlation":
+                    nums = pd.to_numeric(tbl["相关系数r"], errors="coerce").dropna()
+                    ok = bool((tbl["样本天数"] >= 30).all())
+                    msg = (f"{len(tbl)} 组配对，相关系数均在 [-1,1]："
+                           f"{nums.round(2).tolist()}" if len(nums) else "有效配对不足")
+                elif kind == "source_profile":
+                    ok, msg = True, f"{len(tbl)} 项代理指标（比值/相关性/季节结构），方向性参考"
                 elif kind == "compare":
                     ok, msg = True, f"分组均值对比，共 {len(tbl)} 组"
                 elif kind == "trend":
@@ -471,8 +568,11 @@ class ReActAgent:
         """单个结果块 → (表格HTML, 表格文本)。"""
         kind, tbl = b["kind"], b["table"]
         if kind in ("annual_rank", "city_exceed", "province_mean", "province_share",
-                    "group_share"):
+                    "group_share", "region_province_top", "correlation"):
             return df_to_html(tbl), df_to_text(tbl)
+        if kind == "source_profile":
+            show = tbl.drop(columns=[c for c in ("数值n",) if c in tbl.columns])
+            return df_to_html(show), df_to_text(show)
         if kind == "compare":
             return df_to_html(tbl.reset_index()), df_to_text(tbl.reset_index())
         if kind == "trend":
@@ -554,13 +654,18 @@ class ReActAgent:
             n = int((tbl["是否超标"] == "超标").sum())
             annual_limit = config.GB3095_GRADE2[p].get("annual")
             direction = "最低" if asc else "最高"
+            head = (f"{len(tbl)} 个省份中{p}平均浓度{direction}的是 "
+                    f"{tbl.iloc[0]['省份']}（{tbl.iloc[0]['平均浓度']}{unit}）")
+            # 两省对比 → 直接给出差值，回答「哪个更严重，差多少」
+            if len(tbl) == 2 and pd.api.types.is_numeric_dtype(tbl["平均浓度"]):
+                hi, lo = tbl.iloc[0], tbl.iloc[1]
+                diff = round(float(hi["平均浓度"]) - float(lo["平均浓度"]), 1)
+                head += f"；{hi['省份']} 比 {lo['省份']} 高 {diff}{unit}（{hi['平均浓度']} vs {lo['平均浓度']}）"
             if annual_limit:
-                return (prefix + f"{len(tbl)} 个省份中{p}平均浓度{direction}的是 "
-                        f"{tbl.iloc[0]['省份']}（{tbl.iloc[0]['平均浓度']}{unit}）；"
-                        f"{n} 个省份年均值超过二级限值 {annual_limit}{unit}")
-            return (prefix + f"{len(tbl)} 个省份{p}平均浓度{direction}的是 "
-                    f"{tbl.iloc[0]['省份']}（{tbl.iloc[0]['平均浓度']}{unit}）；"
-                    f"该污染物无年均限值（依据 {analysis.format_limit_text(p)}）")
+                tail = f"{n} 个省份年均值超过二级限值 {annual_limit}{unit}"
+            else:
+                tail = f"该污染物无年均限值（依据 {analysis.format_limit_text(p)}）"
+            return prefix + head + "；" + tail
 
         if kind in ("province_share", "group_share"):
             label_col = tbl.columns[0]
@@ -569,6 +674,37 @@ class ReActAgent:
             return (prefix + f"{p}超标天数最多的{label_col}：{tbl.iloc[0][label_col]}"
                     f"（占全国 {tbl.iloc[0]['占全国比例%']}%，"
                     f"组内超标率 {tbl.iloc[0]['组内超标率%']}%）")
+
+        if kind == "region_province_top":
+            if tbl.empty:
+                return prefix + "无数据行"
+            m_col = "超标天数" if "超标天数" in tbl.columns else "平均浓度"
+            dir_word = "最轻" if asc else "最严重"
+            parts = []
+            for region in ("北方", "南方"):
+                sub = tbl[tbl["区域"] == region]
+                if sub.empty:
+                    continue
+                names = "、".join(f"{r['省份']}（{r[m_col]}）" for _, r in sub.iterrows())
+                parts.append(f"{region}{dir_word} {len(sub)} 省：{names}")
+            return prefix + "；".join(parts)
+
+        if kind == "correlation":
+            if tbl.empty:
+                return prefix + "无数据行"
+            parts = []
+            for _, r in tbl.iterrows():
+                rv = r["相关系数r"]
+                try:
+                    rv = f"{float(rv):.2f}"
+                except (TypeError, ValueError):
+                    rv = "样本不足"
+                parts.append(f"{r['城市A']}–{r['城市B']}：r={rv}（{r['相关强度']}）")
+            return prefix + "；".join(parts)
+
+        if kind == "source_profile":
+            concl = b.get("conclusion") or "代理指标见结果表"
+            return prefix + concl
 
         if kind == "season_exceed":
             return (prefix + f"{tbl['城市']}{tbl['季节']}共 {tbl['有效天数']} 个有效监测日，"
