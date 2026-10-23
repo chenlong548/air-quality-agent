@@ -320,6 +320,21 @@ def _find_audience(text: str) -> str:
     return "pro" if ("专业" in text or "从业者" in text) else "simple"
 
 
+# 方向词：desc=「最高/最重」类，asc=「最低/最清洁」类
+_DESC_WORDS = r"最高|最重|最差|最多|最严重"
+_ASC_WORDS = r"最低|最好|最优|最清洁|空气好|最轻"
+
+
+def _dual_direction(text: str) -> bool:
+    """多部分问题检测：「最高**和**最低」两个方向同时出现 → 需要双向各排一次。
+
+    规则模式是单意图单链设计，普通问法只取一个方向；但「年均浓度最高
+    和最低的5个城市」这类问法含两个子问题，必须生成两条 aggregate
+    （desc + asc）各自成块，否则会丢一半（M2 类缺陷）。
+    """
+    return bool(re.search(_DESC_WORDS, text)) and bool(re.search(_ASC_WORDS, text))
+
+
 def normalize_city(name):
     """把 LLM/用户写的城市名校正为数据集标准名（北京→北京市、首都→北京、和田→和田地区）。"""
     if not name:
@@ -377,8 +392,13 @@ _OUT_OF_SCOPE_RE = re.compile(
 # ---------------- 规则规划器：意图 → 同构 steps ----------------
 
 def build_steps(intent, pollutant, cities, year, season, top_n, dim, chart, order="desc",
-                memory=None, season_metric="exceed_days", provinces=None):
-    """按识别出的槽位生成标准工具调用链（与 LLM 路径同构）。"""
+                memory=None, season_metric="exceed_days", provinces=None,
+                dual_dir=False, split_region=False):
+    """按识别出的槽位生成标准工具调用链（与 LLM 路径同构）。
+
+    dual_dir: 「最高和最低」类双向问法 → annual_rank 生成 desc/asc 两条链；
+    split_region: exceed_share 问法里带「南北方拆开」→ 追加区域分组对比块。
+    """
     S = Step
     load = S("load_data", {},
              "先分片读取本地数据集并清洗，确保后续统计基于真实监测数据")
@@ -425,6 +445,23 @@ def build_steps(intent, pollutant, cities, year, season, top_n, dim, chart, orde
                   f"从扬尘/交通燃烧/采暖/二次生成等代理指标分析 {city} 的 {pollutant} 来源特征"),
                 ck, plot(chart or "bar"), val]
     if intent == "annual_rank":
+        if dual_dir:
+            # 「最高和最低的 N 个城市」：两个子问题 → desc/asc 各一条 aggregate，
+            # 引擎为每块独立渲染表格/研判/图表（多结果块机制）
+            return [load,
+                    S("aggregate", {"group_by": "city", "metric": "mean",
+                                    "pollutant": pollutant, "year": year,
+                                    "top_n": top_n, "order": "desc"},
+                      f"按城市分组计算 {pollutant} 年均浓度，取浓度最高的前 {top_n} 个"
+                      f"（问题的前半部分）"),
+                    plot(chart or "bar"),
+                    S("aggregate", {"group_by": "city", "metric": "mean",
+                                    "pollutant": pollutant, "year": year,
+                                    "top_n": top_n, "order": "asc"},
+                      f"同一指标反向取浓度最低的前 {top_n} 个"
+                      f"（问题的后半部分）"),
+                    plot(chart or "bar"),
+                    ck, val]
         return [load,
                 S("aggregate", {"group_by": "city", "metric": "mean", "pollutant": pollutant,
                                 "year": year, "top_n": top_n, "order": order},
@@ -436,11 +473,20 @@ def build_steps(intent, pollutant, cities, year, season, top_n, dim, chart, orde
                   f"计算 {pollutant} 月度浓度变化曲线（未指定城市时取年均 TOP{top_n}）"),
                 ck, plot(chart or "line"), val]
     if intent == "exceed_share":
-        return [load,
-                S("aggregate", {"group_by": "province", "metric": "exceed_days",
-                                "pollutant": pollutant, "cities": cities, "year": year},
-                  f"按省份统计 {pollutant} 超标天数并计算占全国比例"),
-                ck, plot(chart or "pie"), val]
+        steps = [load,
+                 S("aggregate", {"group_by": "province", "metric": "exceed_days",
+                                 "pollutant": pollutant, "cities": cities, "year": year},
+                   f"按省份统计 {pollutant} 超标天数并计算占全国比例"),
+                 plot(chart or "pie")]
+        if split_region:
+            # 「各省占比，再按南北方拆开对比」：追加区域分组块（group_share）
+            steps += [
+                S("aggregate", {"group_by": "north_south", "metric": "exceed_days",
+                                "pollutant": pollutant, "year": year},
+                  f"再把全国 {pollutant} 超标天数按南北方拆成两组对比（问题的后半部分）"),
+                plot("bar")]
+        steps += [ck, val]
+        return steps
     if intent == "city_season":
         return [load,
                 S("season_exceed", {"city": cities[0] if cities else "北京",
@@ -514,6 +560,16 @@ def rule_plan(question: str, memory=None, default_year=None, available_years=Non
         intent = "exceed_share"
     # 「哪个季节最严重」：问平均浓度用 mean，否则按超标天数
     season_metric = "mean" if re.search(r"平均", question) else "exceed_days"
+    # 多部分问题旗标（规则模式单链设计的两个已知盲区）：
+    # ① 「最高和最低」双向问法 → desc/asc 两条链，各自成块
+    dual_dir = intent == "annual_rank" and _dual_direction(question)
+    if dual_dir:
+        p.thoughts.append("[规划] 检测到双向问法（最高/最低同时出现），"
+                          "生成 desc+asc 两条聚合链，两个方向都回答")
+    # ② 省份占比问法里带「南北方拆开」→ 追加区域分组对比块
+    split_region = intent == "exceed_share" and bool(re.search(r"南北方|南北", question))
+    if split_region:
+        p.thoughts.append("[规划] 检测到区域拆解需求，在省份占比之外追加南北方分组对比")
     # 相关性/来源分析至少分别需要 2 个城市 / 1 个城市，槽位不足时给出明确降级
     if intent == "correlation" and len(p.cities) < 2:
         p.thoughts.append(f"[规划] 相关性分析需要两个城市（识别到 {p.cities or '无'}），"
@@ -526,7 +582,8 @@ def rule_plan(question: str, memory=None, default_year=None, available_years=Non
     p.chart = chart
     p.steps = build_steps(intent, p.pollutant, p.cities, p.year, p.season,
                           p.top_n, p.dim, chart, order, memory=memory,
-                          season_metric=season_metric, provinces=p.provinces)
+                          season_metric=season_metric, provinces=p.provinces,
+                          dual_dir=dual_dir, split_region=split_region)
     p.thoughts.append(f"[规划] 识别意图={intent}, 污染物={p.pollutant}, 方向={order}")
     p.thoughts.append(f"[规划] 参数: 年份={p.year}, 城市={p.cities or '全国'}, "
                       f"季节={p.season or '全年'}, TOP={p.top_n}, 图表={chart}")

@@ -1,180 +1,194 @@
-# 空气质量时序分析 Agent（环境 + 大数据）
+# Air Quality Analysis Agent
 
-OHCP 一小时智能编程大赛作品。自然语言提问 → **LLM 针对每个问题现生成工具调用链**（function calling 风格，任意问法）→ ReAct 引擎按链逐步调度 → 本地真实数据集分片读取清洗 → 聚合统计 → **GB 3095-2012 国标超标研判** → 文本结论 + 可视化图表 + HTML 报告。课程思政内容随分析结果自然融入，不弹窗、不说教。
+**Natural language in, tool-call chains out.** A ReAct agent that turns plain-language questions into executable analysis pipelines over **137,250 real daily monitoring records** (375 Chinese cities, full-year 2024) — with GB 3095-2012 compliance judgment, streaming execution traces, and zero-dependency web console.
 
-## 一键启动
+[![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Web UI](https://img.shields.io/badge/web%20ui-stdlib%20only-cyan.svg)](web.py)
+[![Tests](https://img.shields.io/badge/regression%20suites-4%20passing-brightgreen.svg)](tests/)
 
-**网页版（推荐，浏览器聊天界面，流式展示调度链）：**
+![Web console](docs/screenshot-web.png)
+
+## What it does
+
+Ask a question in plain language — *"Which 5 cities had the highest PM2.5 in 2024, and what were the cleanest 5?"* — and the agent:
+
+1. **Plans** a tool-call chain for that specific question (LLM function calling, or the built-in local rule planner as offline fallback);
+2. **Executes** it step by step on the real dataset (chunked loading → cleaning → aggregation → standard-based judgment);
+3. **Streams** every Thought / Action / Observation event to the browser while it runs;
+4. **Delivers** a structured conclusion, data tables, and charts — with a validation pass on the numbers.
+
+The LLM only decomposes tasks. Every number comes from local computation over the dataset — the model never touches the data.
+
+## Features
+
+- **Per-question tool-chain planning** — function-calling style: the LLM composes any of the 10 tools per question, so phrasing is free-form. No fixed intent table to match against.
+- **Dual-mode planner with graceful fallback** — if the LLM times out, returns non-JSON, or hallucinates an unknown tool, the local rule planner takes over automatically. Fully functional with no API key and no network.
+- **10 analysis tools** — grouped aggregation (including north/south group slicing), monthly trends, seasonal exceedance, MAD 3σ anomaly detection, inter-city Pearson correlation, pollution-source proxy analysis, national-standard lookup, charting, and result validation.
+- **National-standard judgment** — GB 3095-2012 (Grade II) for the six pollutants, HJ 633-2012 for AQI. Pollutants without an annual limit are labeled as such instead of being silently misjudged.
+- **Multi-part questions** — each sub-question becomes an independent result block; nothing gets overwritten by the last step. Bidirectional asks ("highest *and* lowest 5 cities") return both rankings.
+- **Group slicing** — "the 3 worst provinces in the north and the south, each" returns per-region TOP-N slices directly, no manual regrouping from a 31-province table.
+- **Multi-turn memory** — follow-ups like "what about Shanghai?" inherit context (year, pollutant) and switch scope correctly. Sessions are isolated per browser tab.
+- **Honest refusals** — weather, foreign regions, and chitchat are explicitly declined with a note on what the agent *can* analyze, instead of being force-fitted to air-quality data.
+- **Streaming web console** — SSE push with monotonic-clock throttling, plan-card preview, live ReAct trace, inline tables and charts, dark telemetry theme. Built on the Python standard library (`ThreadingHTTPServer`) — no Flask, no FastAPI.
+- **Concurrent by design** — the dataset is loaded once and read-only; each request gets its own agent instance. Measured: 3 concurrent questions in 14 s vs 36 s serial.
+- **Redundant-step pruning** — LLM plans are deduplicated before execution (adjacent repeats, identical recomputations), so occasional over-planning costs nothing.
+- **Regression suites** — 4 test scripts covering the new capabilities, rule-mode coverage, concurrency, and a 20-question generalization audit in both planner modes.
+
+## Quick start
 
 ```bash
-pip install -r requirements.txt
-python web.py            # 默认 http://127.0.0.1:8611，自动打开浏览器
-python web.py --interval 1.5   # 调整流式步进间隔（秒，默认 1.0）
-```
+pip install -r requirements.txt   # pandas + matplotlib only
 
-**命令行版：**
+# Web console (recommended) — opens http://127.0.0.1:8611
+python web.py
+python web.py --port 8080 --interval 1.5   # custom port / stream pacing
 
-```bash
+# Command line
 python run.py
+python run.py "Which city had the worst PM2.5 pollution in 2024?"
 ```
 
-启动后输入自然语言提问即可，例如：
+Then ask anything, for example:
 
-- `找出2024年PM2.5年均浓度最高的5个城市，画出月度变化曲线`
-- `筛选PM2.5超标记录，统计各省份超标天数占比`
-- `统计北京市夏季臭氧O3超标总天数`
-- `北京2024年O3有没有异常跳变`
-- `对比2024年南北方城市PM2.5污染差异`
-- `2024年南北各自超标最严重的3个省份是哪些`（分组切片）
-- `北京和上海的PM2.5污染是否相关`（相关性分析）
-- `北京的PM2.5污染主要来自哪里`（来源代理分析）
-- `新疆和河北哪个省份PM10污染更严重`（省份对比）
+- `Which 5 cities had the highest PM2.5 annual mean in 2024, and which 5 the lowest?`
+- `Is the PM2.5 pollution in Beijing and Shijiazhuang synchronized?`
+- `Where does Beijing's PM2.5 pollution mainly come from?`
+- `The 3 provinces with the most PM2.5 exceedance days in the north and in the south, each`
+- `Which season has the worst ozone pollution?`
+- `Are there anomaly jumps in Beijing's O3 during 2024?`
+- `How many cities met the Grade II annual PM2.5 standard in 2024?`
 
-也支持单条命令直接跑：`python run.py "统计北京市夏季臭氧O3超标总天数"`
+CLI extras: `help`, `board` (task dashboard), `mode pro|simple` (output template), `quit`.
 
-交互命令：`help` 帮助 ｜ `board` 任务看板 ｜ `mode 专业/简易` 切换输出模板 ｜ `quit` 退出。
-
-网页版与命令行版共用同一套 Agent 内核，额外提供：快捷提问 chips、规划卡片（调用链预览）、ReAct 执行轨迹逐条流式渲染、结果表格与图表内联展示。
-
-## Agent 调度链（核心机制）
-
-规划器把每个问题解析为一条**工具调用链**（steps），引擎逐步执行，每步一个事件：
+## How it works
 
 ```
-用户提问
-  → 规划器生成调用链（LLM function calling / 本地规则，自动容错回退）
-     例：load_data → aggregate(province, exceed_days) → check_standard
-          → plot_chart(pie) → validate
-  → 引擎逐步执行，每步发出 Thought / Action / Observation 事件
-  → 网页版：事件入消息队列，SSE 按 ≥1s 间隔依次推送，前端逐条渲染
+ user question
+      │
+      ▼
+ ┌─────────────┐   LLM available?   ┌──────────────┐
+ │   planner   │─── yes ───────────▶│  LLM plans   │  function-calling style,
+ │  (router)   │                    │  the chain   │  per-question tool chain
+ └─────────────┘                    └──────────────┘
+      │ no (timeout / bad JSON / unknown tool)
+      ▼
+ ┌──────────────┐
+ │ local rules  │  intent + slots → same step structure
+ └──────────────┘
+      │
+      ▼
+ TaskPlan(steps = [Step(tool, args, thought), ...])
+      │
+      ▼
+ ReAct engine ── per step: Thought → Action → Observation ──▶ event stream
+      │                                                        │
+      │  10 tools over chunked dataframe                       ▼
+      ▼                                              SSE (≥1s pacing) → browser
+ tables · charts · judgment · validation             plan card · step cards · conclusion
 ```
 
-可用工具（LLM 可自由组合，参数任意）：
+Every tool is a pure function over the dataframe; results accumulate as independent blocks so multi-part questions render side by side. `validate` re-checks share sums, ranking monotonicity, and sample sizes before the conclusion is shown.
 
-| 工具 | 作用 | 关键参数 |
+## Tools
+
+| Tool | Purpose | Key args |
 |---|---|---|
-| load_data | 分片读取并清洗数据集 | — |
-| aggregate | 分组聚合 | group_by=city/province/season/north_south，metric=mean/exceed_days，pollutant（六项+AQI），cities，provinces，year，top_n（全量排名用 500），order=asc/desc（最低/最高在前），split_by=north_south（省份按南北方分组切片） |
-| trend | 城市月度趋势 | cities，pollutant，year |
-| season_exceed | 单城市单季节超标天数 | city，season，pollutant，year |
-| anomaly | MAD 3σ 异常检测 | city，pollutant，year |
-| city_correlation | 两城市日浓度 Pearson 相关（污染是否同步/区域传输） | cities，pollutant，year |
-| pollution_source | 污染来源代理分析（扬尘/交通燃烧/采暖/二次生成） | city，pollutant，year |
-| check_standard | 限值口径（GB 3095-2012 / AQI 按 HJ 633-2012） | pollutant，kind |
-| plot_chart | 可视化（auto 按结果选图型；>40 行自动跳过绘图） | chart=auto/line/bar/pie |
-| validate | 结果合理性校验（多结果块逐块校验） | — |
+| `load_data` | Chunked read + clean of the dataset | — |
+| `aggregate` | Grouped aggregation | `group_by=city/province/season/north_south`, `metric=mean/exceed_days`, `pollutant`, `cities`, `provinces`, `year`, `top_n` (500 for full ranking), `order=asc/desc`, `split_by=north_south` (per-region TOP-N) |
+| `trend` | Monthly concentration curves | `cities`, `pollutant`, `year` |
+| `season_exceed` | Single city × season exceedance | `city`, `season`, `pollutant`, `year` |
+| `anomaly` | MAD 3σ jump detection | `city`, `pollutant`, `year` |
+| `city_correlation` | Two-city daily Pearson r (regional transport / synchronicity) | `cities`, `pollutant`, `year` |
+| `pollution_source` | Source proxy analysis (dust / traffic & combustion / heating / secondary formation) | `city`, `pollutant`, `year` |
+| `check_standard` | Limit lookup (GB 3095-2012 / HJ 633-2012) | `pollutant`, `kind` |
+| `plot_chart` | auto line / bar / pie | `chart` |
+| `validate` | Sanity checks on every result block | — |
 
-## 泛化能力与诚实拒答
+## Data
 
-- **多部分问题**：每个子问题独立成结果块，全部保留展示（不再被最后一步覆盖）；
-- **语义方向**：「最好/最低」→ order=asc，「最差/最高」→ order=desc，不再答反；
-- **全量排名**：top_n 上限 500（375 城），「排全国第几」「多少个城市达标」直接在研判里给答案（含目标城市名次定位、达标/超标计数、两城差值）；
-- **分组切片**：「南北各自超标最严重的 3 个省份」→ `aggregate(split_by=north_south, top_n=3)` 自动按组切片输出南北各自的组内 TOP N，不用用户自己从 31 省表归组；
-- **AQI 一等公民**：问 AQI 不再静默替换成 PM2.5（超标判定依据 HJ 633-2012，>100 为超标日）；
-- **年份越界**：问 2023/2025 → 明确提示数据覆盖范围并改用可用年份（trend 空表不再崩溃），LLM 与规则模式都会在思考中说明替换、不静默；
-- **能力边界**：气象要素/外国/闲聊 → LLM 输出 `out_of_scope` 诚实拒答并引导可分析什么（规则兜底模式亦有关键词拒答）；
-- **多轮记忆**：LLM 路径注入上一轮上下文（保守继承：本问已明确范围时以本问为准），「那上海呢」「这几个城市」式追问可正确继承；
-- **冗余步骤剪枝**：LLM 偶发多规划步骤时自动去重（同工具同参数、重复 validate），不浪费执行时间；
-- **规则兜底模式**：无网无 Key 时覆盖分组切片、省份排名、季节之最、城市别名（首都→北京）、定位问法等问法，同一问题集 20 题中 18 题给出有效结果；
-- **回归工具**：`tests/generalization_audit.py`（20 条全新问法 LLM 模式审计）、`tests/rule_mode_audit.py`（同一问题集强制规则模式审计）、`tests/audit_focus.py`（针对性复验）、`tests/smoke_new_caps.py`（新能力冒烟），审计日志落盘 `outputs/logs/`。
+- **Source**: CN-AIR — public daily air-quality monitoring data from the China National Environmental Monitoring Centre (MIT-licensed), 375 cities, full-year 2024, six pollutants + AQI, **137,250 daily records**.
+- **Pipeline**: hourly wide tables → tidy long table via `scripts/prepare_data.py` (chunked conversion); reload with chunked readers — nothing is fully materialized twice.
+- **Regenerate**:
 
-## 流式推送架构（网页版）
-
-```
-浏览器 EventSource ──GET /api/stream?q=...──▶ 服务端
-                                                │
-   Agent 后台线程运行 ──每步事件──▶ queue.Queue（消息队列缓冲）
-                                                │
-   SSE 生成器按单调时钟节流：相邻事件间隔不足 --interval 秒时 sleep 补齐，
-   再依次推送 ──▶ 前端逐条渲染（规划卡片 → 步骤卡片 → 图表 → 结论表格）
+```bash
+python scripts/fetch_data.py --year 2024
+python scripts/prepare_data.py --raw-dir <unpacked-dir> --year 2024
 ```
 
-事件序列示例（共 23 个）：`thought×3 → plan → (thought → action → observation)×5 步 → chart → table → done → closed`。
-`POST /api/ask` 保留为一次性接口（兼容命令行与测试）。
+Daily-value conventions are documented in `data/DATASET.md`.
 
-**并发模型**：数据集只加载一次且全程只读；每次提问现场创建独立的 ReActAgent
-实例（无全局串行锁），多人同时提问并行执行；多轮记忆按 sid（前端
-sessionStorage 生成）隔离，不同标签页/浏览器的「那上海呢」式追问互不串扰。
-3 路并发实测：墙钟 14s vs 串行总和 36s。验证脚本：`tests/web_concurrency_check.py`。
+## Standards
 
-## 目录结构
+| Pollutant | Metric | Grade II limit |
+|---|---|---|
+| PM2.5 | 24 h / annual | 75 / 35 μg/m³ |
+| PM10 | 24 h / annual | 150 / 70 μg/m³ |
+| SO₂ | 24 h / annual | 150 / 60 μg/m³ |
+| NO₂ | 24 h / annual | 80 / 40 μg/m³ |
+| O₃ | 8 h rolling max | 160 μg/m³ |
+| CO | 24 h | 4 mg/m³ |
+
+AQI follows HJ 633-2012 (>100 = exceedance day).
+
+## Testing
+
+```bash
+python tests/smoke_new_caps.py          # new capabilities + pruning + multi-part regression (10 assertions)
+python tests/rule_mode_audit.py         # 20-question audit, LLM forcibly disabled → 20/20 semantically complete
+python tests/generalization_audit.py    # same 20 questions, LLM mode, novel phrasings
+python tests/web_concurrency_check.py   # 3 concurrent SSE streams + session isolation (14 s vs 36 s serial)
+```
+
+Audit logs are written to `outputs/logs/`.
+
+## Optional: LLM task planning
+
+Works out of the box with the local rule planner. To enable LLM-planned chains, point it at any OpenAI-compatible endpoint:
+
+```bash
+# .env in the project root (auto-loaded at startup)
+AQ_LLM_BASE_URL=https://api.openai.com/v1
+AQ_LLM_API_KEY=sk-...
+AQ_LLM_MODEL=gpt-4o-mini
+```
+
+The web console header shows the active planner (LLM / local rules). Failure modes — timeout, non-JSON, unknown tool, out-of-range args — all fall back to the rule planner automatically.
+
+## Project structure
 
 ```
 air-quality-agent/
-├── run.py                     # 命令行一键启动入口
-├── web.py                     # 网页版启动入口（零第三方 Web 框架）
+├── run.py                     # CLI entry
+├── web.py                     # Web console entry (stdlib HTTP + SSE, no framework)
 ├── requirements.txt
-├── aq_agent/                  # 主包
-│   ├── config.py              # GB 3095-2012 限值、路径、季节常量
-│   ├── geo.py                 # 城市→省份映射（375 城）
-│   ├── data_layer.py          # 分片(chunk)读取 + 清洗
-│   ├── analysis.py            # 聚合统计 / 国标判定 / 异常检测 / 结果校验
-│   ├── planner.py             # 自然语言→任务计划（规则 + 可选 LLM）
-│   ├── react_agent.py         # ReAct 引擎 + 工具集合
-│   ├── memory.py              # 多轮对话记忆 + 任务看板
-│   ├── charts.py              # matplotlib 折线/柱状/饼图（中文字体自适应）
-│   ├── report.py              # 结构化文本 + HTML 报告 + 思政文案
-│   └── cli.py                 # 命令行交互
-├── scripts/
-│   ├── fetch_data.py          # 下载原始数据（CN-AIR，git LFS 稀疏检出）
-│   └── prepare_data.py        # 日宽表 → tidy 日长表（分片转换）
-├── data/
-│   ├── processed/air_quality_2024.csv   # 分析用数据集（137,250 行）
-│   └── DATASET.md             # 数据集说明与口径
-└── outputs/                   # 运行产出：charts / reports / logs
+├── aq_agent/                  # Core package
+│   ├── config.py              # GB 3095-2012 limits, paths, season constants
+│   ├── geo.py                 # City → province map (375 cities)
+│   ├── data_layer.py          # Chunked read + cleaning
+│   ├── analysis.py            # Aggregation, standard judgment, anomaly, validation
+│   ├── planner.py             # Question → task plan (LLM + local rules)
+│   ├── react_agent.py         # ReAct engine + the 10 tools
+│   ├── memory.py              # Multi-turn memory + task dashboard
+│   ├── charts.py              # matplotlib line/bar/pie (Chinese font auto-setup)
+│   ├── report.py              # Structured text + HTML reports
+│   └── cli.py                 # Interactive CLI
+├── scripts/                   # Data fetch / prepare
+├── data/processed/            # Analysis dataset (137,250 rows)
+└── tests/                     # 4 regression / audit suites
 ```
 
-## 数据集（真实公开数据，非模拟）
+## License
 
-- 来源：**CN-AIR**（中国环境监测总站公开数据整理，MIT 许可），
-  覆盖 375 个城市、2024 全年逐日六项污染物 + AQI；
-- 原始为小时级宽表（每日一个 CSV），`scripts/prepare_data.py`
-  分片转换为 tidy 长表；日值口径见 `data/DATASET.md`；
-- 重新生成数据：`python scripts/fetch_data.py --year 2024` 后运行
-  `python scripts/prepare_data.py --raw-dir <解压目录> --year 2024`。
+[MIT](LICENSE). Dataset © China National Environmental Monitoring Centre (CN-AIR, MIT), used for research and learning.
 
-## 国标口径（GB 3095-2012 二级标准）
+---
 
-| 污染物 | 判定指标 | 二级限值 |
-|---|---|---|
-| PM2.5 | 24h 平均 / 年平均 | 75 / 35 μg/m³ |
-| PM10 | 24h 平均 / 年平均 | 150 / 70 μg/m³ |
-| SO₂ | 24h 平均 / 年平均 | 150 / 60 μg/m³ |
-| NO₂ | 24h 平均 / 年平均 | 80 / 40 μg/m³ |
-| O₃ | 日最大 8h 平均 | 160 μg/m³ |
-| CO | 24h 平均 | 4 mg/m³ |
+## 中文简介
 
-## 创新点（加分项）
+空气质量时序分析 Agent：自然语言提问 → **LLM 针对每个问题现生成工具调用链**（function calling 风格，任意问法；无 Key 无网时自动回退本地规则规划器）→ ReAct 引擎按链逐步调度 → 本地真实数据集分片读取清洗 → 聚合统计 → **GB 3095-2012 国标超标研判** → 文本结论 + 可视化图表 + HTML 报告，网页版 SSE 流式展示全过程。
 
-1. **多轮对话记忆**：追问「再看这几个城市的 PM10 情况」自动继承上下文；
-2. **分组切片分析**：「南北各自最严重的 N 个省份」自动按组切片，无需人工归组；
-3. **高阶归因工具**：城市间 Pearson 相关（区域传输/同步性）、污染来源代理分析（扬尘比值/交通同源/采暖贡献/二次生成，诚实标注非源谱解析）；
-4. **异常告警**：MAD 3σ 检测时序跳变，标记污染突发时段；
-5. **结果校验工具**：占比合计=100%、排名单调性、样本量校验，降低规划错误；
-6. **任务日志看板**：查询历史、耗时统计、高频任务（`board` 命令）；
-7. **双输出模板**：简易解读版 / 专业统计版（`mode` 命令切换）；
-8. **网页版并发**：每请求独立 Agent + 按会话隔离记忆，多人同时提问不排队；
-9. **大数据分片加载**：日文件 + chunksize 流式读取，不一次性载入内存。
-
-## 接入大模型做任务规划（function calling）
-
-默认使用本地规则规划器（无网、无 Key 也能完整演示）。接入 LLM 后，
-**每个问题都由大模型现生成工具调用链**，任意问法都能规划：
-
-```bash
-set AQ_LLM_BASE_URL=https://api.openai.com/v1   # 或任何 OpenAI 兼容接口
-set AQ_LLM_API_KEY=sk-...
-set AQ_LLM_MODEL=gpt-4o-mini
-```
-
-也可以写入项目根目录的 `.env` 文件（`AQ_LLM_BASE_URL=...` 每行一项），
-启动时自动加载。网页版顶部会显示当前规划来源（LLM / 本地规则）。
-
-**容错设计**：LLM 超时、返回非 JSON、工具名不在白名单、参数越界等情况，
-全部自动回退到本地规则规划器，演示不中断。核心计算（读取/清洗/统计/超标/绘图）
-始终基于本地数据与自定义工具，大模型只负责任务拆解，不碰任何数字。
-
-## 演示建议（60 分钟）
-
-10min 审题 + 工具设计 → 40min 编码调试 → 10min 提交展示。
-上台演示顺序：三个示例提问跑完整链路 → 追问一句验证多轮记忆 → `board` 看看板 → 打开 HTML 报告展示图表与思政融入。
+- **数据**：CN-AIR 公开监测数据，375 城 × 2024 全年 × 137,250 条日记录（六项污染物 + AQI）；
+- **能力**：10 个分析工具（分组切片/月度趋势/季节超标/MAD 3σ 异常/城市间相关性/来源代理分析/国标查询/绘图/校验）、多部分问题分块作答、多轮记忆按会话隔离、域外问题诚实拒答；
+- **运行**：`pip install -r requirements.txt` 后 `python web.py`（默认 8611 端口）或 `python run.py`；
+- **测试**：`tests/` 下 4 个回归/审计脚本，规则模式与 LLM 模式双覆盖。

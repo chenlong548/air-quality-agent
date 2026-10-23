@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""输出层：结构化文本结论、HTML 报告、课程思政文案自然融入。"""
+"""输出层：结构化文本结论、HTML 报告、健康科普与数据说明。"""
 import datetime
 import html
 import os
@@ -7,17 +7,15 @@ import os
 from . import config
 from . import analysis
 
-# ---------------- 课程思政文案（简短、随业务输出、不弹窗不说教） ----------------
+# ---------------- 健康科普与标准提示（随业务输出） ----------------
 
-EDU_GB_TIP = ("我国《环境空气质量标准》GB 3095-2012 规定：{limit}。"
-              "改善大气环境质量、守护人居生态，青年一代正可以运用大数据与 AI 技术"
-              "助力生态环境监测，把论文写在祖国大地上。")
+GB_TIP = ("我国《环境空气质量标准》GB 3095-2012 规定：{limit}。")
 
-EDU_CLOSING = ("环境小感悟：大气监测时序大数据为城市大气污染防控提供重要支撑。"
-               "绿水青山就是金山银山，新时代青年可以将 Agent 与大数据技术服务美丽中国建设，践行科技报国。")
+DATA_NOTE = ("数据说明：以上统计基于中国环境监测总站公开数据集 CN-AIR（日值口径），"
+             "仅供研究与学习参考，不作为环境监管或执法依据。")
 
-EDU_BUSINESS = ("业务解读：时序监测大数据可支撑污染溯源与治理评估——"
-                "持续追踪高值时段与区域分布，是精准治霾、科学治污的重要依据。")
+BUSINESS_NOTE = ("业务解读：时序监测大数据可支撑污染溯源与治理评估——"
+                 "持续追踪高值时段与区域分布，是精准治霾、科学治污的重要依据。")
 
 POLLUTION_CARD = {
     "PM2.5": "PM2.5 可深入肺部并进入血液，长期暴露增加呼吸道与心血管疾病风险。",
@@ -32,7 +30,7 @@ POLLUTION_CARD = {
 
 def edu_limit_tip(pollutant, kind=None):
     limit_text = analysis.format_limit_text(pollutant, kind)
-    return EDU_GB_TIP.format(limit=limit_text)
+    return GB_TIP.format(limit=limit_text)
 
 
 def build_text_report(plan, result) -> str:
@@ -48,10 +46,10 @@ def build_text_report(plan, result) -> str:
         lines.append(f"【图表输出】{result['图表路径']}")
     if result.get("校验"):
         lines.append(f"【结果校验】{result['校验']}")
-    # 思政自然融入：国标科普 + 感悟，随结果一并输出
+    # 健康科普卡片 + 数据说明，随结果一并输出
     if plan.pollutant in POLLUTION_CARD:
         lines.append(f"【科普卡片】{POLLUTION_CARD[plan.pollutant]}")
-    lines.append(EDU_CLOSING)
+    lines.append(DATA_NOTE)
     return "\n".join(lines)
 
 
@@ -66,11 +64,11 @@ def build_html_report(plan, result) -> str:
         return f'<section><h2>{html.escape(title)}</h2>{body_html}</section>'
 
     table_html = result.get("表格HTML", "")
-    edu_html = ""
+    info_html = ""
     if plan.pollutant in POLLUTION_CARD:
-        edu_html += f'<div class="tip"><b>科普卡片</b>：{html.escape(POLLUTION_CARD[plan.pollutant])}</div>'
-    edu_html += f'<div class="tip"><b>国标提示</b>：{html.escape(edu_limit_tip(plan.pollutant))}</div>'
-    edu_html += f'<div class="soul">{html.escape(EDU_CLOSING)}</div>'
+        info_html += f'<div class="tip"><b>科普卡片</b>：{html.escape(POLLUTION_CARD[plan.pollutant])}</div>'
+    info_html += f'<div class="tip"><b>国标提示</b>：{html.escape(edu_limit_tip(plan.pollutant))}</div>'
+    info_html += f'<div class="soul">{html.escape(DATA_NOTE)}</div>'
 
     page = f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
@@ -102,7 +100,7 @@ pre{{background:#080d18;border:1px solid var(--line);border-radius:6px;padding:1
 {sec("统计结果", table_html)}
 {sec("超标研判", f"<p>{html.escape(result.get('超标研判', ''))}</p>") if result.get("超标研判") else ""}
 {sec("可视化图表", f'<img src="{chart_rel}" alt="chart">') if chart_rel else ""}
-{sec("课程思政融入", edu_html)}
+{sec("健康科普与数据说明", info_html)}
 {sec("Agent 执行轨迹", f"<pre>{html.escape(result.get('trace', ''))}</pre>")}
 </div></body></html>"""
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")

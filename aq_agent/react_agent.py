@@ -671,6 +671,13 @@ class ReActAgent:
             label_col = tbl.columns[0]
             if tbl.empty:
                 return prefix + "无数据行"
+            if label_col == "区域" and len(tbl) <= 4:
+                # 南北方/季节分组对比：逐组列出，而不是只说「最多的一组」
+                parts = "，".join(
+                    f"{r[label_col]}超标 {r['超标天数']} 天"
+                    f"（占全国 {r['占全国比例%']}%，组内超标率 {r['组内超标率%']}%）"
+                    for _, r in tbl.iterrows())
+                return prefix + f"{p}超标天数区域对比：{parts}"
             return (prefix + f"{p}超标天数最多的{label_col}：{tbl.iloc[0][label_col]}"
                     f"（占全国 {tbl.iloc[0]['占全国比例%']}%，"
                     f"组内超标率 {tbl.iloc[0]['组内超标率%']}%）")

@@ -59,6 +59,52 @@ def main():
                                             "split_by": "north_south", "top_n": 3}))
     print(planner._clean_args("aggregate", {"group_by": "city", "split_by": "north_south"}))
 
+    # 4) 多部分问题（双向问法 / 区域拆解）——规则模式语义完整性回归
+    print("\n===== 多部分问题：双向问法 + 区域拆解 =====")
+    failures = []
+
+    def check(name, cond, detail):
+        print(f"  [{'✅' if cond else '❌'}] {name}: {detail}")
+        if not cond:
+            failures.append(name)
+
+    # 4.1 单元级：_dual_direction 判定
+    check("_dual_direction 双向问法", planner._dual_direction(
+        "2024年PM2.5年均浓度最高和最低的5个城市分别是哪些") is True, "最高+最低 → True")
+    check("_dual_direction 单向不误判", planner._dual_direction(
+        "2024年全国空气质量最好的10个城市是哪些") is False, "仅「最好」 → False")
+    check("_dual_direction 反向单向", planner._dual_direction(
+        "2024年CO浓度最低的5个省份排名") is False, "仅「最低」 → False")
+
+    # 4.2 端到端：M2 双向问法 → 最高/最低两块都出
+    q_m2 = "2024年PM2.5年均浓度最高和最低的5个城市分别是哪些"
+    r = agent.run(q_m2)
+    research = r.get("超标研判", "")
+    n_blocks = research.count("结果")
+    check("M2 双向出两块", "结果1" in research and "结果2" in research,
+          f"研判含 结果1/结果2（{n_blocks} 处标记）")
+    check("M2 最高块", "最高" in research and "和田地区" in research,
+          "最高块含和田地区")
+    check("M2 最低块", "最低" in research and "阿里地区" in research,
+          "最低块含阿里地区")
+    orders = [s.args.get("order") for s in r["plan"].steps if s.tool == "aggregate"]
+    check("M2 双方向参数", orders == ["desc", "asc"], f"aggregate order={orders}")
+
+    # 4.3 端到端：C3 省份占比 + 南北方拆开
+    q_c3 = "各省PM2.5超标天数占比，再按南北方拆开对比"
+    r3 = agent.run(q_c3)
+    research3 = r3.get("超标研判", "")
+    check("C3 省份占比块", "省份" in research3 and "河南" in research3,
+          "省份占比块含河南")
+    check("C3 区域拆解块", "区域对比" in research3 and "北方" in research3 and "南方" in research3,
+          "区域对比块含北方/南方")
+    gbs = [s.args.get("group_by") for s in r3["plan"].steps if s.tool == "aggregate"]
+    check("C3 双聚合维度", gbs == ["province", "north_south"], f"aggregate group_by={gbs}")
+
+    print(f"\n# 多部分问题回归: {'全部通过' if not failures else '失败: ' + ', '.join(failures)}")
+    if failures:
+        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

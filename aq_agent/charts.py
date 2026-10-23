@@ -5,7 +5,7 @@ import os
 import uuid
 
 import matplotlib
-matplotlib.use("Agg")  # 无界面环境渲染，比赛现场不弹窗
+matplotlib.use("Agg")  # 无界面环境渲染，服务端/CI 不弹窗
 import matplotlib.pyplot as plt
 from matplotlib import font_manager
 
